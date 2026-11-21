@@ -51,7 +51,7 @@ test("compileShotToRaeaTsx generates valid raea TSX composition", () => {
   };
   const tsx = compileShotToRaeaTsx(shot, world);
   assert.match(tsx, /import \{[\s\S]*registerRoot[\s\S]*\} from "raea"/);
-  assert.match(tsx, /id="shot_01"/);
+  assert.match(tsx, /id="shot-01"/);
   assert.match(tsx, /durationInFrames=\{72\}/);
   assert.match(tsx, /base_color="#336699"/);
 });
