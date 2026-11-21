@@ -1,0 +1,191 @@
+id: book-to-film-rpg
+title: "Книга в кино · НРИ → 3D → Фильм"
+version: 1
+description: >-
+  Соло-НРИ по произвольной главе книги (1–20 стр.) с лёгкой механикой 2d6,
+  живым 3D-превизом сцен на raea и сборкой финального художественного
+  мини-фильма (2–5 мин) после утверждения 3D-аниматика и сметы.
+
+case_templates:
+  - id: book-to-film-rpg.session
+    version: 1
+    title: "Игровая сессия и экранизация"
+    kind: task
+    intake:
+      - {key: goal, title: "Глава книги / сценарий и желаемый визуальный стиль", kind: text, required: true}
+      - {key: visual_style, title: "Пресет стиля (photoreal_cinema / arcane_3d / anime / noir)", kind: text, required: false}
+      - {key: hero_name, title: "Имя и краткий образ героя", kind: text, required: false}
+    workflow:
+      initial_state: intake
+      states:
+        - intake
+        - world_building
+        - playing
+        - animatic_review
+        - payment_approval
+        - rendering
+        - done
+      terminal_states: [done]
+      transitions:
+        - {source: intake, target: world_building}
+        - {source: world_building, target: playing}
+        - {source: playing, target: animatic_review}
+        - {source: animatic_review, target: playing}
+        - {source: animatic_review, target: payment_approval}
+        - {source: payment_approval, target: animatic_review}
+        - {source: payment_approval, target: rendering}
+        - {source: rendering, target: animatic_review}
+        - {source: rendering, target: done}
+    required_capabilities: [dialog, case_patch]
+    approvals:
+      human_from: 2
+      always_require: [propose_decision]
+    done_criteria:
+      - Игровая история доведена до финала либо поставлена на паузу по решению игрока.
+      - Сгенерирован и приложен к делу артефакт (озвученный 3D-аниматик либо финальный фильм MP4 до 32 МБ / ссылка на мастер-копию).
+
+tariffs:
+  - id: po_animatic
+    title: "Аудио-аниматик (3D raea + озвучка)"
+    deliverable: >-
+      Сжатый 3D-аниматик игровой сессии (2–5 мин) на движке raea с
+      многоголосым TTS по ролям, фоновой музыкой, SFX и субтитрами.
+    price: 290
+    currency: CREDITS
+    budget_calls: 25
+    excludes: [нейросетевая видеогенерация V2V, публикация на внешних площадках]
+    on_overrun: finish_at_loss
+    case_template: book-to-film-rpg.session
+  - id: po_episode_stylized
+    title: "Мини-фильм: Стилизация (Аниме / Arcane / Нуар)"
+    deliverable: >-
+      Художественный мини-фильм (2–3 мин, 1080p) из утверждённого 3D-аниматика
+      через облачный V2V с консистентностью персонажей, звуком и 3 бесплатными
+      пересъёмками отдельных шотов.
+    price: 1490
+    currency: CREDITS
+    budget_calls: 40
+    excludes: [права на коммерческое распространение текста исходной книги, автопубликация]
+    on_overrun: stop_and_refund
+    case_template: book-to-film-rpg.session
+  - id: po_episode_cinema
+    title: "Мини-фильм: Кинореализм (Премиум)"
+    deliverable: >-
+      Фотореалистичный мини-фильм (до 5 мин, 1080p) на старших V2V-моделях с
+      усиленной привязкой референсов героев, полным звуком и 8 пересъёмками шотов.
+    price: 3490
+    currency: CREDITS
+    budget_calls: 60
+    excludes: [права на исходную книгу, автопубликация]
+    on_overrun: stop_and_refund
+    case_template: book-to-film-rpg.session
+
+entity_types:
+  - type: world_bible
+    title: Библия мира
+    plural: Библии мира
+    sensitivity: normal
+    fields:
+      - {key: style_preset, title: Стиль, kind: text, required: true}
+      - {key: locations_json, title: Локации и зоны, kind: text, required: true}
+      - {key: plot_graph_json, title: Граф сюжета, kind: text, required: true}
+  - type: character_card
+    title: Персонаж
+    plural: Персонажи
+    sensitivity: normal
+    fields:
+      - {key: name, title: Имя, kind: text, required: true}
+      - {key: role, title: Роль, kind: text, required: true}
+      - {key: stats_json, title: Характеристики и инвентарь, kind: text, required: true}
+      - {key: visual_ref_url, title: Референс внешности, kind: text, required: false}
+      - {key: voice_id, title: Голос TTS, kind: text, required: false}
+  - type: game_event
+    title: Событие хода
+    plural: События ходов
+    sensitivity: normal
+    fields:
+      - {key: turn_index, title: Номер хода, kind: text, required: true}
+      - {key: roll_summary, title: Бросок 2d6, kind: text, required: false}
+      - {key: event_json, title: Дельта состояния и реплики, kind: text, required: true}
+      - {key: previz_url, title: 3D-превиз (raea), kind: text, required: false}
+  - type: episode_cut
+    title: Сборка фильма
+    plural: Сборки фильма
+    sensitivity: normal
+    fields:
+      - {key: shots_json, title: "Раскадровка (список ShotSpec)", kind: text, required: true}
+      - {key: animatic_url, title: Озвученный 3D-аниматик, kind: text, required: false}
+      - {key: estimated_price, title: Смета в кредитах, kind: text, required: false}
+      - {key: final_video_url, title: Финальный фильм MP4, kind: text, required: false}
+
+party_roles:
+  - {role: player, title: Игрок, likely_user: true, reciprocal: director}
+  - {role: director, title: Режиссёр-наблюдатель, likely_user: true, reciprocal: player}
+
+document_kinds:
+  - библия мира
+  - лист героя
+  - журнал игровой сессии
+  - сценарий эпизода
+  - 3D-аниматик
+  - финальный мини-фильм
+
+agents:
+  - id: world-builder
+    title: "Архитектор мира"
+    purpose: >-
+      Читаешь загруженную главу книги (1–20 стр.) и строишь Библию мира:
+      локации с пространственными зонами и пропами, список персонажей с
+      3–5 характеристиками и описанием внешности под выбранный стиль, а также
+      граф ключевых сюжетных узлов. Подготавливаешь стартовую сцену для
+      ИИ-мастера.
+    label: book_to_film_rpg_world_builder
+    side: need_help
+    capabilities: [dialog, case_patch]
+    tools: []
+    web_search: false
+    match_priority: 60
+    model: mimo-v2.5
+    never:
+      - "не запускаешь платный видеорендер и не обещаешь бесплатную генерацию видео"
+      - "не копируешь исходную книгу дословно и не выдаёшь её за официальное издание"
+      - "не изменяешь и не удаляешь исходные файлы пользователя"
+
+  - id: game-master
+    title: "ИИ-Мастер и 3D-оператор"
+    purpose: >-
+      Ведёшь соло-НРИ по Библии мира с лёгкой нарративной механикой 2d6
+      (<=6 провал с поворотом, 7–9 частичный успех с ценой, 10+ чистый успех).
+      Один ход — одна сцена и один значимый выбор. После каждого важного хода
+      записываешь структурированное событие GameEvent (дельта локаций, инвентаря,
+      реплик) и формируешь JSON ShotSpec для быстрого 3D-превиза на raea.
+    label: book_to_film_rpg_game_master
+    side: need_help
+    capabilities: [dialog, case_patch]
+    tools: []
+    web_search: false
+    match_priority: 85
+    model: mimo-v2.5
+    never:
+      - "не решаешь действия, реплики и согласие за игрока"
+      - "не запускаешь платный V2V-рендер во время игровых ходов"
+      - "не выдаёшь текстовое описание или 3D-превиз за готовый финальный фильм"
+
+  - id: showrunner
+    title: "Шоураннер и режиссёр монтажа"
+    purpose: >-
+      Сжимаешь пройденную игровую сессию в драматургический сценарий эпизода
+      (2–5 минут, 15–30 шотов) по принципу Audio-First: сначала тайминги реплик,
+      затем 3D-аниматик на raea. Показываешь игроку аниматик и точную смету
+      в кредитах ДО запуска платной видеогенерации; ждёшь явного утверждения.
+    label: book_to_film_rpg_showrunner
+    side: need_help
+    capabilities: [dialog, case_patch]
+    tools: []
+    web_search: false
+    match_priority: 70
+    model: mimo-v2.5
+    never:
+      - "не запускаешь платную видеогенерацию без показа сметы и явного подтверждения человека"
+      - "не скрываешь стоимость пересъёмки отдельных шотов и лимит размера файла 32 МБ"
+      - "не передаёшь персональные данные пользователя во внешние видеопромпты"

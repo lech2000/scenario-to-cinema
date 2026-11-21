@@ -1,0 +1,22 @@
+{
+  "name": "scenario-to-cinema",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm -w @cinema-rpg/shared run build && npm -w @cinema-rpg/raea-dsl run build && npm -w @cinema-rpg/providers run build && npm -w @cinema-rpg/connector run build",
+    "typecheck": "npm run build && npm run typecheck --workspaces",
+    "test": "npm run test --workspaces --if-present",
+    "spike:compile": "npm --workspace=@cinema-rpg/raea-dsl run spike:compile",
+    "connector:dev": "npm --workspace=@cinema-rpg/connector run dev",
+    "pack:bundle": "bash fixar-pack/scripts/package-pack.sh"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

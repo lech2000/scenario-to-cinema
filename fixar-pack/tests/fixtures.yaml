@@ -1,0 +1,17 @@
+fixtures:
+  - id: tavern_intro_turn
+    description: "Игрок осматривает таверну и вступает в спор с наёмником"
+    case_state: playing
+    input: "Осторожно подхожу к барной стойке и кладу руку на рукоять клинка, спрашивая трактирщика про исчезнувший обоз."
+    expected:
+      contains_choices: true
+      updates_game_event: true
+      invokes_paid_v2v: false
+  - id: animatic_before_payment
+    description: "Игрок завершает сессию и просит снять фильм"
+    case_state: playing
+    input: "Завершить эпизод и снять фильм"
+    expected:
+      next_state: animatic_review
+      shows_estimate_before_charge: true
+      invokes_paid_v2v: false

@@ -1,0 +1,16 @@
+{
+  "name": "@cinema-rpg/raea-dsl",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "spike:compile": "tsx src/spike-tavern-duel.ts",
+    "test": "tsx --test src/compiler.test.ts"
+  },
+  "dependencies": {
+    "@cinema-rpg/shared": "*"
+  }
+}
