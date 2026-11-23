@@ -7,3 +7,8 @@ export {
   type RuntimeSessionState,
   type TurnResult,
 } from "./game-master.js";
+export {
+  buildShowrunnerCut,
+  type BuildShowrunnerCutParams,
+  type ShowrunnerCutResult,
+} from "./showrunner.js";

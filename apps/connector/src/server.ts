@@ -6,6 +6,7 @@ import os from "node:os";
 import { z } from "zod";
 import {
   type DiceRoll,
+  type EpisodeCut,
   type GameEvent,
   type RenderJob,
   type ShotRenderState,
@@ -13,6 +14,8 @@ import {
   type SubtitleCue,
   type TariffTier,
   type WorldBible,
+  CameraModeSchema,
+  DialogueLineSchema,
   EpisodeCutSchema,
   ShotSpecSchema,
   StylePresetIdSchema,
@@ -23,6 +26,7 @@ import {
   type RuntimeSessionState,
   type StructuredLLMClient,
   OpenAICompatibleLLMClient,
+  buildShowrunnerCut,
   createInitialSession,
   ingestScenarioText,
   processGameTurn,
@@ -53,6 +57,7 @@ import {
   findFfmpegBinary,
   findRaeaBinary,
   muxVideoWithAudioAndSubs,
+  renderCreditsClipMp4,
   renderShotWithRaea,
 } from "./raea-runner.js";
 import { renderStudioHtml } from "./studio-html.js";
@@ -107,6 +112,36 @@ const TurnRequestSchema = z.object({
 });
 
 const AnimaticRequestSchema = z.object({
+  tariffTier: TariffTierSchema.default("po_episode_stylized"),
+  includeCredits: z.boolean().optional(),
+  customTitle: z.string().max(120).optional(),
+  directedBy: z.string().max(120).optional(),
+});
+
+const ShowrunnerRequestSchema = z.object({
+  tariffTier: TariffTierSchema.default("po_episode_stylized"),
+  maxShots: z.number().int().min(1).max(30).default(12),
+  targetMaxDurationSec: z.number().min(15).max(360).default(240),
+  customTitle: z.string().max(120).optional(),
+  directedBy: z.string().max(120).optional(),
+  includeCredits: z.boolean().default(true),
+});
+
+const EditShotRequestSchema = z.object({
+  cameraMode: CameraModeSchema.optional(),
+  dialogueText: z.string().min(1).max(1000).optional(),
+  emotion: DialogueLineSchema.shape.emotion.optional(),
+  v2vPrompt: z.string().min(1).max(1000).optional(),
+  tariffTier: TariffTierSchema.default("po_episode_stylized"),
+  renderMp4: z.boolean().default(true),
+});
+
+const UpdateCreditsRequestSchema = z.object({
+  enabled: z.boolean().optional(),
+  episodeTitle: z.string().min(1).max(120).optional(),
+  subtitle: z.string().min(1).max(160).optional(),
+  directedBy: z.string().min(1).max(120).optional(),
+  durationSec: z.number().min(2).max(12).optional(),
   tariffTier: TariffTierSchema.default("po_episode_stylized"),
 });
 
@@ -181,6 +216,41 @@ function buildRoleLinesForTurn(event: GameEvent, wb: WorldBible): RoleLineInput[
   }
 
   return lines;
+}
+
+function synthesizeOutroChord(durationSec: number, sampleRate: number): Int16Array {
+  const totalSamples = Math.max(1, Math.round(durationSec * sampleRate));
+  const out = new Int16Array(totalSamples);
+  // Warm A-minor9 cinema outro chord (A2, E3, C4, G4, B4)
+  const freqs = [110, 164.81, 261.63, 392.0, 493.88];
+  for (let i = 0; i < totalSamples; i++) {
+    const t = i / sampleRate;
+    const attack = Math.min(1, t / 0.45);
+    const release = Math.min(1, (durationSec - t) / 0.9);
+    const env = Math.max(0, attack * release) * 0.14;
+    let sum = 0;
+    for (let k = 0; k < freqs.length; k++) {
+      sum += Math.sin(2 * Math.PI * freqs[k] * t) / (1 + k * 0.35);
+    }
+    const sample = Math.max(-1, Math.min(1, (sum / freqs.length) * env * 2.2));
+    out[i] = Math.round(sample * 32767);
+  }
+  return out;
+}
+
+function computeCutEstimate(cut: EpisodeCut, tariffTier?: TariffTier) {
+  const tier = tariffTier ?? cut.tariffTier;
+  const shotsDur = cut.shots.reduce(
+    (sum, s) => sum + (s.audio?.audioDurationSec ?? s.durationInFrames / s.fps),
+    0
+  );
+  const creditsDur = cut.credits?.enabled !== false ? (cut.credits?.durationSec ?? 4) : 0;
+  return estimateEpisodeCost({
+    episodeCutId: cut.id,
+    tariffTier: tier,
+    shotCount: cut.shots.length,
+    totalDurationSec: Math.min(360, Math.max(1, Number((shotsDur + creditsDur).toFixed(2)))),
+  });
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -612,6 +682,290 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         });
       }
 
+      const showrunnerMatch = url.pathname.match(
+        /^\/v1\/sessions\/(sess_[a-f0-9]+)\/showrunner$/
+      );
+      if (method === "POST" && showrunnerMatch) {
+        const session = sessions.get(showrunnerMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        if (session.shots.length === 0) {
+          return sendJson(res, 422, {
+            ok: false,
+            error: "Сначала сделайте хотя бы один игровой ход.",
+          });
+        }
+        const parsed = ShowrunnerRequestSchema.parse(await readJsonBody(req));
+        const resCut = await buildShowrunnerCut({
+          cutId: `ep_${session.sessionId}`,
+          caseId: session.caseId,
+          worldBible: session.worldBible,
+          events: session.events,
+          shots: session.shots,
+          tariffTier: parsed.tariffTier,
+          maxShots: parsed.maxShots,
+          targetMaxDurationSec: parsed.targetMaxDurationSec,
+          customTitle: parsed.customTitle,
+          directedBy: parsed.directedBy,
+          includeCredits: parsed.includeCredits,
+          llm: llmClient,
+        });
+        session.episodeCut = resCut.episodeCut;
+        session.animaticApproved = false;
+        const estimate = computeCutEstimate(session.episodeCut, parsed.tariffTier);
+        return sendJson(res, 200, {
+          ok: true,
+          episodeCut: session.episodeCut,
+          droppedShotIds: resCut.droppedShotIds,
+          source: resCut.source,
+          estimate,
+        });
+      }
+
+      const shotEditMatch = url.pathname.match(
+        /^\/v1\/sessions\/(sess_[a-f0-9]+)\/shots\/([a-zA-Z0-9_-]+)$/
+      );
+      if (shotEditMatch && (method === "PATCH" || method === "DELETE")) {
+        const session = sessions.get(shotEditMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        if (session.shots.length === 0) {
+          return sendJson(res, 422, { ok: false, error: "Нет шотов для редактирования." });
+        }
+        const targetShotId = shotEditMatch[2];
+
+        if (!session.episodeCut) {
+          const initCut = await buildShowrunnerCut({
+            cutId: `ep_${session.sessionId}`,
+            caseId: session.caseId,
+            worldBible: session.worldBible,
+            events: session.events,
+            shots: session.shots,
+            llm: llmClient,
+          });
+          session.episodeCut = initCut.episodeCut;
+        }
+
+        if (method === "DELETE") {
+          const idx = session.episodeCut.shots.findIndex((s) => s.id === targetShotId);
+          if (idx < 0) {
+            return sendJson(res, 404, { ok: false, error: `Shot "${targetShotId}" not found` });
+          }
+          if (session.episodeCut.shots.length <= 1) {
+            return sendJson(res, 422, {
+              ok: false,
+              error: "В эпизоде должен остаться хотя бы один шот.",
+            });
+          }
+          session.episodeCut.shots.splice(idx, 1);
+          if (session.episodeCut.beats) {
+            session.episodeCut.beats = session.episodeCut.beats.filter(
+              (b) => b.shotId !== targetShotId
+            );
+          }
+          session.episodeCut.animaticApproved = false;
+          session.animaticApproved = false;
+          const estimate = computeCutEstimate(session.episodeCut);
+          return sendJson(res, 200, {
+            ok: true,
+            deletedShotId: targetShotId,
+            episodeCut: session.episodeCut,
+            estimate,
+          });
+        }
+
+        // PATCH shot (camera angle, dialogue line + TTS re-synthesis, v2vPrompt)
+        const parsed = EditShotRequestSchema.parse(await readJsonBody(req));
+        const shot = session.episodeCut.shots.find((s) => s.id === targetShotId);
+        if (!shot) {
+          return sendJson(res, 404, { ok: false, error: `Shot "${targetShotId}" not found` });
+        }
+
+        if (parsed.cameraMode) {
+          shot.camera.mode = parsed.cameraMode;
+        }
+        if (parsed.v2vPrompt) {
+          shot.v2vPrompt = parsed.v2vPrompt;
+        }
+
+        const baseName = `${session.sessionId}_${shot.id}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+        const staleMp4 = path.join(workDir, `${baseName}.mp4`);
+        if (fs.existsSync(staleMp4)) {
+          fs.unlinkSync(staleMp4);
+        }
+
+        if (parsed.dialogueText !== undefined || parsed.emotion !== undefined) {
+          const existingDlg = shot.audio?.dialogueLine;
+          const defaultSpeakerId =
+            existingDlg?.speakerId ??
+            shot.actors[1]?.characterId ??
+            shot.actors[0]?.characterId ??
+            session.worldBible.characters[0].id;
+          const profile = session.worldBible.characters.find((c) => c.id === defaultSpeakerId);
+          const updatedDlg = {
+            speakerId: defaultSpeakerId,
+            text: parsed.dialogueText ?? existingDlg?.text ?? "...",
+            emotion: parsed.emotion ?? existingDlg?.emotion ?? "tense",
+          };
+
+          const existingCues = shot.audio?.subtitles ?? [];
+          const nonTargetLines: RoleLineInput[] = existingCues
+            .filter((c) => c.speakerId !== defaultSpeakerId)
+            .map((c) => {
+              const p = session.worldBible.characters.find((ch) => ch.id === c.speakerId);
+              return {
+                speakerId: c.speakerId,
+                speakerName: c.speakerName,
+                role: p?.role ?? "narrator",
+                voiceId: p?.voiceId ?? "voice_ru_narrator",
+                text: c.text,
+                emotion: "neutral",
+              };
+            });
+
+          const roleLines: RoleLineInput[] = [
+            ...nonTargetLines,
+            {
+              speakerId: updatedDlg.speakerId,
+              speakerName: profile?.name ?? updatedDlg.speakerId,
+              role: profile?.role ?? "npc",
+              voiceId: profile?.voiceId ?? "voice_ru_narrator",
+              text: updatedDlg.text,
+              emotion: updatedDlg.emotion,
+            },
+          ];
+
+          const audioTrack = await synthesizeTurnAudioTrack({
+            outDir: workDir,
+            baseName,
+            lines: roleLines,
+            sfxTags: shot.audio?.sfxTags ?? [],
+            fps: shot.fps,
+            provider: audioProvider,
+          });
+
+          shot.durationInFrames = audioTrack.durationInFrames;
+          shot.audio = {
+            ...(shot.audio ?? { sfxTags: [] }),
+            dialogueLine: updatedDlg,
+            ttsAudioPath: audioTrack.wavPath,
+            audioDurationSec: audioTrack.durationSec,
+            subtitles: audioTrack.cues,
+          };
+          session.shotMedia[shot.id] = {
+            ...session.shotMedia[shot.id],
+            wavUrl: `/media/${path.basename(audioTrack.wavPath)}`,
+            srtUrl: `/media/${path.basename(audioTrack.srtPath)}`,
+            vttUrl: `/media/${path.basename(audioTrack.vttPath)}`,
+            wavPath: audioTrack.wavPath,
+            durationSec: audioTrack.durationSec,
+          };
+        }
+
+        const tsx = compileShotToRaeaTsx(shot, session.worldBible);
+        const tsxPath = path.join(workDir, `${baseName}.tsx`);
+        fs.writeFileSync(tsxPath, tsx, "utf-8");
+
+        const render = enableLiveRaea
+          ? await renderShotWithRaea({
+              tsxPath,
+              outDir: workDir,
+              shotId: baseName,
+              keyframe: Math.floor(shot.durationInFrames / 2),
+              renderMp4: parsed.renderMp4,
+            })
+          : { renderedLive: false, durationMs: 0 };
+
+        const wavPath =
+          session.shotMedia[shot.id]?.wavPath ?? path.join(workDir, `${baseName}.wav`);
+        const srtPath = path.join(workDir, `${baseName}.srt`);
+        if (render.mp4File && fs.existsSync(wavPath)) {
+          await muxVideoWithAudioAndSubs({
+            mp4Path: path.join(workDir, render.mp4File),
+            wavPath,
+            srtPath: fs.existsSync(srtPath) ? srtPath : undefined,
+          });
+        }
+
+        session.shotMedia[shot.id] = {
+          ...session.shotMedia[shot.id],
+          tsxPath,
+          pngUrl: render.pngFile
+            ? `/media/${render.pngFile}`
+            : session.shotMedia[shot.id]?.pngUrl,
+          mp4Url: render.mp4File ? `/media/${render.mp4File}` : undefined,
+        };
+
+        // Mirror edits back to raw session.shots when matching id exists
+        const rawIdx = session.shots.findIndex((s) => s.id === shot.id);
+        if (rawIdx >= 0) {
+          session.shots[rawIdx] = JSON.parse(JSON.stringify(shot)) as ShotSpec;
+        }
+
+        session.episodeCut.tariffTier = parsed.tariffTier;
+        session.episodeCut.animaticApproved = false;
+        session.animaticApproved = false;
+        const estimate = computeCutEstimate(session.episodeCut, parsed.tariffTier);
+
+        return sendJson(res, 200, {
+          ok: true,
+          shot,
+          media: session.shotMedia[shot.id],
+          episodeCut: session.episodeCut,
+          estimate,
+        });
+      }
+
+      const creditsMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/credits$/);
+      if (method === "PATCH" && creditsMatch) {
+        const session = sessions.get(creditsMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        if (session.shots.length === 0) {
+          return sendJson(res, 422, { ok: false, error: "Сначала сделайте хотя бы один ход." });
+        }
+        const parsed = UpdateCreditsRequestSchema.parse(await readJsonBody(req));
+        if (!session.episodeCut) {
+          const initCut = await buildShowrunnerCut({
+            cutId: `ep_${session.sessionId}`,
+            caseId: session.caseId,
+            worldBible: session.worldBible,
+            events: session.events,
+            shots: session.shots,
+            tariffTier: parsed.tariffTier,
+            llm: llmClient,
+          });
+          session.episodeCut = initCut.episodeCut;
+        }
+        const prevCredits = session.episodeCut.credits ?? {
+          enabled: true,
+          episodeTitle: session.episodeCut.title ?? session.worldBible.title,
+          subtitle: "Интерактивный 3-актный эпизод · Книга в кино",
+          starring: session.worldBible.characters.map((c) => c.name),
+          directedBy: "Игрок и AI Showrunner · ФиксАР",
+          footerNote: "cinema-rpg/book-to-film-rpg",
+          durationSec: 4,
+        };
+        session.episodeCut.credits = {
+          ...prevCredits,
+          ...(parsed.enabled !== undefined ? { enabled: parsed.enabled } : {}),
+          ...(parsed.episodeTitle !== undefined ? { episodeTitle: parsed.episodeTitle } : {}),
+          ...(parsed.subtitle !== undefined ? { subtitle: parsed.subtitle } : {}),
+          ...(parsed.directedBy !== undefined ? { directedBy: parsed.directedBy } : {}),
+          ...(parsed.durationSec !== undefined ? { durationSec: parsed.durationSec } : {}),
+        };
+        if (parsed.episodeTitle) {
+          session.episodeCut.title = parsed.episodeTitle;
+        }
+        session.episodeCut.tariffTier = parsed.tariffTier;
+        session.episodeCut.animaticApproved = false;
+        session.animaticApproved = false;
+        const estimate = computeCutEstimate(session.episodeCut, parsed.tariffTier);
+        return sendJson(res, 200, {
+          ok: true,
+          credits: session.episodeCut.credits,
+          episodeCut: session.episodeCut,
+          estimate,
+        });
+      }
+
       const animaticMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/animatic$/);
       if (method === "POST" && animaticMatch) {
         const session = sessions.get(animaticMatch[1]);
@@ -623,11 +977,43 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           });
         }
         const parsed = AnimaticRequestSchema.parse(await readJsonBody(req));
+
+        if (!session.episodeCut) {
+          const cutRes = await buildShowrunnerCut({
+            cutId: `ep_${session.sessionId}`,
+            caseId: session.caseId,
+            worldBible: session.worldBible,
+            events: session.events,
+            shots: session.shots,
+            tariffTier: parsed.tariffTier,
+            customTitle: parsed.customTitle,
+            directedBy: parsed.directedBy,
+            includeCredits: parsed.includeCredits ?? true,
+            llm: llmClient,
+          });
+          session.episodeCut = cutRes.episodeCut;
+        } else {
+          session.episodeCut.tariffTier = parsed.tariffTier;
+          if (session.episodeCut.credits) {
+            if (parsed.includeCredits !== undefined) {
+              session.episodeCut.credits.enabled = parsed.includeCredits;
+            }
+            if (parsed.customTitle) {
+              session.episodeCut.credits.episodeTitle = parsed.customTitle;
+              session.episodeCut.title = parsed.customTitle;
+            }
+            if (parsed.directedBy) {
+              session.episodeCut.credits.directedBy = parsed.directedBy;
+            }
+          }
+        }
+
+        const activeCut = session.episodeCut;
         const mp4Paths: string[] = [];
         const shotSampleChunks: Int16Array[] = [];
         const shotSubtitleInputs: Array<{ durationSec: number; cues: SubtitleCue[] }> = [];
 
-        for (const shot of session.shots) {
+        for (const shot of activeCut.shots) {
           const baseName = `${session.sessionId}_${shot.id}`.replace(
             /[^a-zA-Z0-9_-]/g,
             "_"
@@ -676,8 +1062,47 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           }
         }
 
-        const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
         const epBase = `${session.sessionId}_animatic`;
+        let creditsIncluded = false;
+        if (activeCut.credits && activeCut.credits.enabled !== false) {
+          const creditsSec = activeCut.credits.durationSec ?? 4;
+          const castLine =
+            activeCut.credits.starring.length > 0
+              ? ` · В ролях: ${activeCut.credits.starring.slice(0, 3).join(", ")}`
+              : "";
+          shotSubtitleInputs.push({
+            durationSec: creditsSec,
+            cues: [
+              {
+                index: 1,
+                startSec: 0.2,
+                endSec: Number(Math.max(1.2, creditsSec - 0.2).toFixed(3)),
+                speakerId: "credits",
+                speakerName: "ТИТРЫ",
+                text: `«${activeCut.credits.episodeTitle}»${castLine} · Режиссёр: ${activeCut.credits.directedBy}`,
+              },
+            ],
+          });
+          if (shotSampleChunks.length > 0) {
+            shotSampleChunks.push(synthesizeOutroChord(creditsSec, AUDIO_SAMPLE_RATE));
+          }
+          if (mp4Paths.length > 0) {
+            const creditsMp4Path = path.join(workDir, `${epBase}_credits.mp4`);
+            const creditsRender = await renderCreditsClipMp4({
+              credits: activeCut.credits,
+              outPath: creditsMp4Path,
+              matchVideoPath: mp4Paths[0],
+            });
+            if (creditsRender.ok) {
+              mp4Paths.push(creditsMp4Path);
+              creditsIncluded = true;
+            }
+          } else {
+            creditsIncluded = true;
+          }
+        }
+
+        const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
         const epSrtFile = `${epBase}.srt`;
         const epVttFile = `${epBase}.vtt`;
         const epSrtPath = path.join(workDir, epSrtFile);
@@ -712,16 +1137,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           session.animaticUrl = `/media/${outFile}`;
         }
 
-        const totalDurationSec = session.shots.reduce(
-          (sum, s) => sum + (s.audio?.audioDurationSec ?? s.durationInFrames / s.fps),
-          0
-        );
-        const estimate = estimateEpisodeCost({
-          episodeCutId: `ep_${session.sessionId}`,
-          tariffTier: parsed.tariffTier,
-          shotCount: session.shots.length,
-          totalDurationSec,
-        });
+        const estimate = computeCutEstimate(activeCut, parsed.tariffTier);
 
         return sendJson(res, 200, {
           ok: true,
@@ -730,6 +1146,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           srtUrl: `/media/${epSrtFile}`,
           vttUrl: `/media/${epVttFile}`,
           subtitles: mergedCues,
+          episodeCut: activeCut,
+          creditsIncluded,
           bytes: concat.bytes,
           concatNote: concat.note,
           estimate,
@@ -740,11 +1158,12 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
       if (method === "POST" && approveMatch) {
         const session = sessions.get(approveMatch[1]);
         if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
-        if (session.shots.length === 0) {
+        const activeShots = session.episodeCut?.shots ?? session.shots;
+        if (activeShots.length === 0) {
           return sendJson(res, 422, { ok: false, error: "Нет шотов для финального рендера." });
         }
         const parsed = ApproveSessionRequestSchema.parse(await readJsonBody(req));
-        const episodeCutId = `ep_${session.sessionId}`;
+        const episodeCutId = session.episodeCut?.id ?? `ep_${session.sessionId}`;
         const grant = await billing.verifyPaymentGrant({
           caseId: session.caseId,
           episodeCutId,
@@ -756,9 +1175,12 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
 
         session.animaticApproved = true;
+        if (session.episodeCut) {
+          session.episodeCut.animaticApproved = true;
+        }
         const jobId = `job_${crypto.randomBytes(8).toString("hex")}`;
         const previzByShotId: Record<string, string> = {};
-        for (const s of session.shots) {
+        for (const s of activeShots) {
           const media = session.shotMedia[s.id];
           previzByShotId[s.id] = media?.mp4Url
             ? path.join(workDir, path.basename(media.mp4Url))
@@ -768,9 +1190,9 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         const ctx = await runPerShotV2VQueue({
           jobId,
           caseId: session.caseId,
-          idempotencyKey: `${episodeCutId}_${parsed.tariffTier}`,
+          idempotencyKey: `${episodeCutId}_${parsed.tariffTier}_${activeShots.length}`,
           tariffTier: parsed.tariffTier,
-          shots: session.shots,
+          shots: activeShots,
           worldBible: session.worldBible,
           previzByShotId,
         });

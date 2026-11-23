@@ -289,17 +289,32 @@ export function renderStudioHtml(): string {
     </details>
 
     <hr style="border:0; border-top:1px solid var(--line); width:100%" />
-    <h2>4. 3D-Аниматик и смета ФиксАР</h2>
+    <h2>4. AI Showrunner, Редактор шотов и 3D-Аниматик</h2>
     <div class="row">
       <select id="tariffSelect" style="flex:1">
         <option value="po_animatic">Аудио-аниматик (290 кр.)</option>
         <option value="po_episode_stylized" selected>Эпизод: Стилизация (V2V)</option>
         <option value="po_episode_cinema">Кинореализм Премиум (V2V)</option>
       </select>
-      <button type="button" id="animaticBtn" disabled>Собрать 3D-аниматик</button>
+      <button type="button" class="ghost small" id="showrunnerBtn" disabled>🎬 3-актный монтаж</button>
+      <button type="button" id="animaticBtn" disabled>Собрать аниматик + титры</button>
     </div>
+    <div class="card" id="creditsBox">
+      <div class="row" style="justify-content:space-between">
+        <b style="font-size:12px">Титры эпизода</b>
+        <label class="row" style="margin:0; font-size:12px">
+          <input type="checkbox" id="creditsEnabledCheck" checked style="width:auto" />
+          Включить титры (4 сек)
+        </label>
+      </div>
+      <div class="row" style="margin-top:6px">
+        <input id="creditsTitleInput" placeholder="Название фильма…" style="flex:1" />
+        <input id="creditsDirectorInput" placeholder="Режиссёр…" value="Игрок и AI Showrunner" style="flex:1" />
+      </div>
+    </div>
+    <div id="cutEditorBox" class="card muted" style="display:none"></div>
     <div class="preview-box" id="animaticBox">Аниматик ещё не собран</div>
-    <div class="card muted" id="estimateCard">Смета появится после сборки аниматика.</div>
+    <div class="card muted" id="estimateCard">Смета появится после сборки монтажа или аниматика.</div>
     <button type="button" id="approveBtn" disabled>Утвердить аниматик и запустить пошотовый V2V</button>
     <div class="status" id="filmStatus"></div>
     <div id="v2vQueueBox" class="card muted" style="display:none"></div>
@@ -385,7 +400,9 @@ document.getElementById("startBtn").onclick = async () => {
     statSelect.disabled = false;
     document.getElementById("turnInput").disabled = false;
     document.getElementById("sendBtn").disabled = false;
+    document.getElementById("showrunnerBtn").disabled = false;
     document.getElementById("animaticBtn").disabled = false;
+    document.getElementById("creditsTitleInput").value = wb.title;
 
     const log = document.getElementById("chatLog");
     log.innerHTML = '<div class="msg"><b>Мастер:</b> ' + wb.sourceExcerptSummary + '<br/><small class="muted">Опишите первый ход героя.</small></div>';
@@ -475,15 +492,172 @@ document.getElementById("turnForm").onsubmit = (e) => {
   submitTurn(text);
 };
 
+const CAMERA_OPTIONS = [
+  ["establishing", "Общий план (establishing)"],
+  ["medium_two_shot", "Двойной средний (two-shot)"],
+  ["over_the_shoulder", "Через плечо (OTS)"],
+  ["close_up", "Крупный план (close-up)"],
+  ["dolly_track", "Проезд камеры (dolly)"],
+  ["low_angle_hero", "Героический нижний (low-angle)"],
+];
+
+function escapeAttr(str) {
+  return String(str || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+function updateEstimateCard(est, extraMeta) {
+  if (!est) return;
+  const sizeMb = extraMeta?.bytes
+    ? (extraMeta.bytes / (1024 * 1024)).toFixed(2) + " МБ (лимит дела ФиксАР: 32 МБ)"
+    : "обновится после сборки MP4";
+  const subLinks = extraMeta?.srtUrl
+    ? '<br/>Субтитры и титры: <a href="' + extraMeta.srtUrl + '" download style="color:var(--accent)">Скачать .srt</a> · <a href="' + extraMeta.vttUrl + '" target="_blank" style="color:var(--accent)">WebVTT</a>'
+    : "";
+  document.getElementById("estimateCard").innerHTML =
+    "<b>Смета ФиксАР:</b> " + est.priceCredits + " кредитов (~" + est.priceRubApprox + " ₽)<br/>" +
+    "Шотов в монтаже: " + est.shotCount + " · Длительность (с титрами): " + est.totalDurationSec + " сек · Бесплатных пересъёмок: " + est.includedRerolls + "<br/>" +
+    "Размер аниматика: " + sizeMb + subLinks;
+}
+
+function renderCutEditor(episodeCut, droppedShotIds) {
+  const box = document.getElementById("cutEditorBox");
+  if (!episodeCut || !episodeCut.shots) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "block";
+  const beatsByShot = {};
+  (episodeCut.beats || []).forEach((b) => { beatsByShot[b.shotId] = b; });
+  const droppedNote = droppedShotIds && droppedShotIds.length > 0
+    ? ' · <span style="color:var(--amber)">сжато лишних ходов: ' + droppedShotIds.length + "</span>"
+    : "";
+
+  const cards = episodeCut.shots.map((shot, idx) => {
+    const beat = beatsByShot[shot.id];
+    const actBadge = beat
+      ? '<span class="badge" style="font-size:11px;padding:1px 7px">Акт ' + beat.act + " · " + beat.dramaticFunction + "</span> "
+      : "";
+    const camOpts = CAMERA_OPTIONS.map(([val, label]) =>
+      '<option value="' + val + '"' + (shot.camera?.mode === val ? " selected" : "") + ">" + label + "</option>"
+    ).join("");
+    const dlgText = shot.audio?.dialogueLine?.text || "";
+    const durSec = shot.audio?.audioDurationSec || (shot.durationInFrames / shot.fps).toFixed(1);
+
+    return '<div class="shot-row" style="flex-direction:column;align-items:stretch" data-shot-card="' + shot.id + '">' +
+      '<div class="row" style="justify-content:space-between">' +
+        '<div>' + actBadge + '<b>#' + (idx + 1) + " (" + shot.id + ')</b> · <span class="muted">' + durSec + ' сек</span></div>' +
+        '<button type="button" class="ghost small" data-del-shot="' + shot.id + '" title="Удалить шот до оплаты">✕ Удалить</button>' +
+      "</div>" +
+      (beat ? '<div class="muted" style="font-size:11.5px">' + escapeAttr(beat.summary) + "</div>" : "") +
+      '<div class="row">' +
+        '<select data-cam-shot="' + shot.id + '" style="flex:1;padding:5px 8px;font-size:12px">' + camOpts + "</select>" +
+        '<button type="button" class="small" data-save-shot="' + shot.id + '">💾 Обновить шот + TTS</button>' +
+      "</div>" +
+      '<input data-dlg-shot="' + shot.id + '" value="' + escapeAttr(dlgText) + '" placeholder="Реплика персонажа в шоте…" style="padding:5px 8px;font-size:12px" />' +
+    "</div>";
+  }).join("");
+
+  box.innerHTML =
+    '<div style="margin-bottom:8px"><b>3-актный сценарий: «' + escapeAttr(episodeCut.title || "") + '»</b>' + droppedNote +
+    '<div class="muted" style="margin-top:2px">' + escapeAttr(episodeCut.logline || "") + "</div></div>" +
+    '<div class="shot-queue">' + cards + "</div>";
+
+  box.querySelectorAll("[data-save-shot]").forEach((btn) => {
+    btn.onclick = async () => {
+      const sid = btn.getAttribute("data-save-shot");
+      const cameraMode = box.querySelector('[data-cam-shot="' + sid + '"]').value;
+      const dialogueText = box.querySelector('[data-dlg-shot="' + sid + '"]').value.trim();
+      btn.disabled = true;
+      document.getElementById("filmStatus").textContent = "Пересчитываем TTS, 3D-кадр и смету для " + sid + "…";
+      try {
+        const res = await fetch("/v1/sessions/" + sessionId + "/shots/" + sid, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            cameraMode,
+            dialogueText: dialogueText || undefined,
+            tariffTier: document.getElementById("tariffSelect").value,
+            renderMp4: document.getElementById("renderMp4Check").checked,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Ошибка сохранения шота");
+        renderCutEditor(data.episodeCut, []);
+        updateEstimateCard(data.estimate);
+        document.getElementById("filmStatus").textContent =
+          "Шот " + sid + " обновлён (" + data.shot.durationInFrames + " кадров). Нажмите «Собрать аниматик + титры» для склейки.";
+      } catch (err) {
+        document.getElementById("filmStatus").textContent = "Ошибка правки шота: " + err.message;
+      } finally {
+        btn.disabled = false;
+      }
+    };
+  });
+
+  box.querySelectorAll("[data-del-shot]").forEach((btn) => {
+    btn.onclick = async () => {
+      const sid = btn.getAttribute("data-del-shot");
+      btn.disabled = true;
+      document.getElementById("filmStatus").textContent = "Удаляем шот " + sid + " из монтажа…";
+      try {
+        const res = await fetch("/v1/sessions/" + sessionId + "/shots/" + sid, { method: "DELETE" });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "Не удалось удалить шот");
+        renderCutEditor(data.episodeCut, []);
+        updateEstimateCard(data.estimate);
+        document.getElementById("filmStatus").textContent =
+          "Шот " + sid + " удалён. Смета уменьшена (" + data.estimate.priceCredits + " кр.).";
+      } catch (err) {
+        document.getElementById("filmStatus").textContent = "Ошибка удаления: " + err.message;
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+document.getElementById("showrunnerBtn").onclick = async () => {
+  if (!sessionId) return;
+  const btn = document.getElementById("showrunnerBtn");
+  btn.disabled = true;
+  document.getElementById("filmStatus").textContent = "AI Showrunner сжимает ходы в 3-актный эпизод…";
+  try {
+    const res = await fetch("/v1/sessions/" + sessionId + "/showrunner", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tariffTier: document.getElementById("tariffSelect").value,
+        customTitle: document.getElementById("creditsTitleInput").value.trim() || undefined,
+        directedBy: document.getElementById("creditsDirectorInput").value.trim() || undefined,
+        includeCredits: document.getElementById("creditsEnabledCheck").checked,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Ошибка AI Showrunner");
+    renderCutEditor(data.episodeCut, data.droppedShotIds);
+    updateEstimateCard(data.estimate);
+    document.getElementById("filmStatus").textContent =
+      "Монтажный лист готов (" + data.episodeCut.shots.length + " шотов). Отредактируйте ракурсы/реплики или соберите аниматик.";
+  } catch (err) {
+    document.getElementById("filmStatus").textContent = "Ошибка: " + err.message;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
 document.getElementById("animaticBtn").onclick = async () => {
   if (!sessionId) return;
   document.getElementById("animaticBtn").disabled = true;
-  document.getElementById("filmStatus").textContent = "Собираем 3D-аниматик (raea + FFmpeg) и смету…";
+  document.getElementById("filmStatus").textContent = "Собираем 3D-аниматик с титрами (raea + FFmpeg) и смету…";
   try {
     const res = await fetch("/v1/sessions/" + sessionId + "/animatic", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tariffTier: document.getElementById("tariffSelect").value }),
+      body: JSON.stringify({
+        tariffTier: document.getElementById("tariffSelect").value,
+        includeCredits: document.getElementById("creditsEnabledCheck").checked,
+        customTitle: document.getElementById("creditsTitleInput").value.trim() || undefined,
+        directedBy: document.getElementById("creditsDirectorInput").value.trim() || undefined,
+      }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Ошибка сборки аниматика");
@@ -493,21 +667,17 @@ document.getElementById("animaticBtn").onclick = async () => {
       const aTrack = data.vttUrl
         ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + data.vttUrl + '" default />'
         : "";
-      aBox.innerHTML = '<video controls autoplay playsinline src="' + data.animaticUrl + '">' + aTrack + '</video>';
+      aBox.innerHTML = '<video controls autoplay playsinline src="' + data.animaticUrl + '?t=' + Date.now() + '">' + aTrack + '</video>';
     } else {
       aBox.textContent = data.concatNote || "Аниматик собран (без MP4).";
     }
-    const est = data.estimate;
-    const sizeMb = data.bytes ? (data.bytes / (1024 * 1024)).toFixed(2) + " МБ (лимит дела ФиксАР: 32 МБ)" : "—";
-    const subLinks = data.srtUrl
-      ? '<br/>Субтитры: <a href="' + data.srtUrl + '" download style="color:var(--accent)">Скачать .srt</a> · <a href="' + data.vttUrl + '" target="_blank" style="color:var(--accent)">WebVTT</a>'
-      : "";
-    document.getElementById("estimateCard").innerHTML =
-      "<b>Смета ФиксАР:</b> " + est.priceCredits + " кредитов (~" + est.priceRubApprox + " ₽)<br/>" +
-      "Шотов: " + est.shotCount + " · Длительность (Audio-First): " + est.totalDurationSec + " сек · Пересъёмок: " + est.includedRerolls + "<br/>" +
-      "Размер аниматика: " + sizeMb + subLinks;
+    if (data.episodeCut) {
+      renderCutEditor(data.episodeCut, []);
+    }
+    updateEstimateCard(data.estimate, data);
     document.getElementById("approveBtn").disabled = false;
-    document.getElementById("filmStatus").textContent = "Аниматик готов! Проверьте и утвердите перед V2V.";
+    document.getElementById("filmStatus").textContent =
+      "Аниматик" + (data.creditsIncluded ? " с финальными титрами" : "") + " готов! Проверьте и утвердите перед V2V.";
   } catch (err) {
     document.getElementById("filmStatus").textContent = "Ошибка: " + err.message;
   } finally {

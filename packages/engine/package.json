@@ -7,7 +7,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx --test src/engine.test.ts"
+    "test": "tsx --test src/engine.test.ts src/showrunner.test.ts"
   },
   "dependencies": {
     "@cinema-rpg/shared": "*",

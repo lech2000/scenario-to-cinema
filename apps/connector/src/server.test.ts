@@ -1,7 +1,26 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import type { AddressInfo } from "node:net";
+import { AUDIO_SAMPLE_RATE, type AudioProvider, encodeMonoWav } from "@cinema-rpg/providers";
 import { createConnectorServer } from "./server.js";
+import { renderCreditsClipMp4 } from "./raea-runner.js";
+
+function createFastTestAudioProvider(dir: string): AudioProvider {
+  let seq = 0;
+  return {
+    name: "fast-test-wav",
+    async synthesizeSpeech({ text }) {
+      const durationSec = Math.max(1.2, Math.min(8, text.length * 0.04));
+      const samples = new Int16Array(Math.round(durationSec * AUDIO_SAMPLE_RATE));
+      const p = path.join(dir, `fast_tts_${++seq}.wav`);
+      fs.writeFileSync(p, encodeMonoWav(samples, AUDIO_SAMPLE_RATE));
+      return { audioPath: p, durationSec };
+    },
+  };
+}
 
 const sampleWorld = {
   id: "wb_1",
@@ -233,7 +252,7 @@ test("interactive session runs book ingest -> 2d6 turn -> TSX compile -> animati
     assert.ok(animJson.srtUrl.endsWith(".srt"));
     assert.ok(animJson.vttUrl.endsWith(".vtt"));
     assert.ok(animJson.audioUrl.endsWith(".wav"));
-    assert.equal(animJson.subtitles.length, turnJson.audio.cues.length);
+    assert.equal(animJson.subtitles.length, turnJson.audio.cues.length + 1); // +1 for end credits cue
 
     const appRes = await fetch(`${base}/v1/sessions/${sid}/approve`, {
       method: "POST",
@@ -375,5 +394,175 @@ test("per-shot V2V queue enforces tariff free-reroll quota and extra payment gra
     assert.equal(paidBody.job.extraRerollCreditsCharged, 120);
   } finally {
     server.close();
+  }
+});
+
+test("AI Showrunner compresses multi-turn session and supports pre-payment shot edit, delete, TTS recalculation, and credits MP4", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cinema-showrunner-test-"));
+  const server = createConnectorServer({
+    enableLiveRaea: false,
+    workDir: tmpDir,
+    audioProvider: createFastTestAudioProvider(tmpDir),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const sessRes = await fetch(`${base}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scenarioText:
+          "Проклятие Серебряного Леса. Следопыт Мира встречает наёмника Шрама у таверны.",
+        stylePreset: "arcane_3d",
+        heroName: "Мира",
+      }),
+    });
+    const { session } = (await sessRes.json()) as { session: { sessionId: string } };
+    const sid = session.sessionId;
+
+    // Play 5 turns
+    for (let i = 1; i <= 5; i++) {
+      const r = await fetch(`${base}/v1/sessions/${sid}/turns`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          playerInput: i === 4 ? "Обнажаю клинок для дуэли!" : `Ход исследования #${i}`,
+          renderMp4: false,
+        }),
+      });
+      assert.equal(r.status, 200);
+    }
+
+    // 1. Compress 5 turns -> 3-act EpisodeCut (maxShots: 3)
+    const srRes = await fetch(`${base}/v1/sessions/${sid}/showrunner`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tariffTier: "po_episode_stylized",
+        maxShots: 3,
+        customTitle: "Клинки Серебряного Леса",
+      }),
+    });
+    assert.equal(srRes.status, 200);
+    const srJson = (await srRes.json()) as {
+      episodeCut: {
+        title: string;
+        shots: Array<{ id: string; camera: { mode: string }; durationInFrames: number }>;
+        beats: Array<{ act: number }>;
+      };
+      droppedShotIds: string[];
+      estimate: { priceCredits: number; shotCount: number };
+    };
+    assert.equal(srJson.episodeCut.shots.length, 3);
+    assert.equal(srJson.droppedShotIds.length, 2);
+    assert.equal(srJson.estimate.shotCount, 3);
+    const credits3Shots = srJson.estimate.priceCredits;
+
+    // 2. Edit first shot's cameraMode and dialogueText -> recalculates TTS frames & TSX
+    const firstShotId = srJson.episodeCut.shots[0].id;
+    const editRes = await fetch(`${base}/v1/sessions/${sid}/shots/${firstShotId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        cameraMode: "low_angle_hero",
+        dialogueText:
+          "Сегодня в этой таверне никто не спрячет правду о пропавшем обозе — говори немедленно, Шрам!",
+        renderMp4: false,
+      }),
+    });
+    assert.equal(editRes.status, 200);
+    const editJson = (await editRes.json()) as {
+      shot: {
+        camera: { mode: string };
+        durationInFrames: number;
+        audio: { dialogueLine: { text: string } };
+      };
+      media: { tsxPath: string };
+    };
+    assert.equal(editJson.shot.camera.mode, "low_angle_hero");
+    assert.match(editJson.shot.audio.dialogueLine.text, /никто не спрячет правду/);
+    const compiledTsx = fs.readFileSync(editJson.media.tsxPath, "utf-8");
+    assert.ok(compiledTsx.length > 200);
+
+    // 3. Delete middle shot -> shot count drops to 2 and FixAR estimate decreases
+    const middleShotId = srJson.episodeCut.shots[1].id;
+    const delRes = await fetch(`${base}/v1/sessions/${sid}/shots/${middleShotId}`, {
+      method: "DELETE",
+    });
+    assert.equal(delRes.status, 200);
+    const delJson = (await delRes.json()) as {
+      episodeCut: { shots: Array<{ id: string }> };
+      estimate: { priceCredits: number; shotCount: number };
+    };
+    assert.equal(delJson.episodeCut.shots.length, 2);
+    assert.equal(delJson.estimate.shotCount, 2);
+    assert.ok(delJson.estimate.priceCredits < credits3Shots);
+
+    // 4. Update credits & build animatic -> verifies [ТИТРЫ] subtitle cue & WAV outro
+    const credRes = await fetch(`${base}/v1/sessions/${sid}/credits`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        episodeTitle: "Хроники Старого Ворона",
+        directedBy: "Режиссёр-тест",
+        durationSec: 4,
+      }),
+    });
+    assert.equal(credRes.status, 200);
+
+    const animRes = await fetch(`${base}/v1/sessions/${sid}/animatic`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tariffTier: "po_episode_stylized" }),
+    });
+    assert.equal(animRes.status, 200);
+    const animJson = (await animRes.json()) as {
+      creditsIncluded: boolean;
+      srtUrl: string;
+      subtitles: Array<{ speakerName: string; text: string }>;
+    };
+    assert.equal(animJson.creditsIncluded, true);
+    const lastCue = animJson.subtitles[animJson.subtitles.length - 1];
+    assert.equal(lastCue.speakerName, "ТИТРЫ");
+    assert.match(lastCue.text, /Хроники Старого Ворона/);
+
+    // Verify standalone credits MP4 slate rendering when ffmpeg is available
+    const creditsMp4 = path.join(tmpDir, "standalone_credits.mp4");
+    const slate = await renderCreditsClipMp4({
+      credits: {
+        enabled: true,
+        episodeTitle: "Хроники Старого Ворона",
+        subtitle: "Финал эпизода",
+        starring: ["Мира — главный герой", "Шрам — антагонист"],
+        directedBy: "Режиссёр-тест",
+        footerNote: "cinema-rpg/book-to-film-rpg",
+        durationSec: 3,
+      },
+      outPath: creditsMp4,
+    });
+    if (slate.ok) {
+      assert.ok(fs.existsSync(creditsMp4));
+      assert.ok(fs.statSync(creditsMp4).size > 1000);
+    }
+
+    // 5. Approve runs V2V only on the 2 curated shots
+    const appRes = await fetch(`${base}/v1/sessions/${sid}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tariffTier: "po_episode_stylized",
+        paymentGrantId: "grant_curated_001",
+      }),
+    });
+    assert.equal(appRes.status, 202);
+    const appJson = (await appRes.json()) as {
+      job: { shotStates: Array<{ shotId: string }> };
+    };
+    assert.equal(appJson.job.shotStates.length, 2);
+  } finally {
+    server.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
