@@ -12,8 +12,8 @@
 - `packages/shared/` — единые Zod/TypeScript-контракты (`WorldBible`, `GameEvent`, `ShotSpec`, `EpisodeCut`, `CostEstimate`, `RenderJob`).
 - `packages/engine/` — World Builder (разбор главы книги 1–20 стр.), ИИ-Мастер с механикой `2d6`, генератор `ShotSpec` и клиент OpenAI-совместимых LLM (с офлайн-фолбэком для запуска без ключей).
 - `packages/raea-dsl/` — детерминированный компилятор `ShotSpec + WorldBible → raea TSX` (14-сегментные шарнирные фигуры персонажей, нативный `<Character>`, пресеты `<Look mode="paint" | "cartoon">` и спайк `src/spike-tavern-duel.ts`).
-- `packages/providers/` — Audio-First синтез речи по ролям (`MultiTierRoleAudioProvider`: OpenAI TTS / локальный macOS `say -v Milena` с тембровым разделением ролей / кроссплатформенный WAV-фолбэк), авто-тайминг кадров через `ffprobe`, генератор `.srt`/`.vtt` субтитров, SFX + ducking эмбиента, а также `VideoProvider`, `BillingAdapter` и смета ФиксАР.
-- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор (`Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → `ffmpeg` микширование AAC + `mov_text` субтитров, смета ФиксАР, проверка утверждения аниматика, `payment_grant_id` и идемпотентности).
+- `packages/providers/` — Audio-First синтез речи по ролям (`MultiTierRoleAudioProvider`: OpenAI TTS / локальный macOS `say -v Milena` с тембровым разделением ролей / кроссплатформенный WAV-фолбэк), авто-тайминг кадров через `ffprobe`, генератор `.srt`/`.vtt` субтитров, SFX + ducking эмбиента, облачный Video-to-Video провайдер (`CloudV2VProvider`: `fal.ai` / `Runway` / `Kling` с авто-генерацией SVG референс-листов персонажей `ensureCharacterReferenceSheets` и контролем квот `reroll`), а также `BillingAdapter` и смета ФиксАР.
+- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор (`Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → `ffmpeg` микширование AAC + `mov_text` субтитров, пошотовая очередь V2V `shotStates`, пересъёмка отдельных шотов `/v1/jobs/:jobId/reroll` и `/v1/sessions/:sessionId/reroll` с квотами тарифа, проверка утверждения аниматика, `payment_grant_id` и идемпотентности).
 - `CODER_SETUP.md` — пошаговая настройка дела `case_f6db507d967c49d9` и внешнего кодера площадки через MCP.
 
 ## Быстрый старт
@@ -34,4 +34,9 @@ npm run connector:dev
 
 # Или с любой OpenAI-совместимой LLM (OpenAI / OpenRouter / локальный LM Studio):
 OPENAI_API_KEY=... LLM_MODEL=gpt-4o-mini npm run connector:dev
+
+# С боевым облачным Video-to-Video провайдером (fal.ai / Runway / Kling):
+FAL_KEY=... V2V_VENDOR=fal npm run connector:dev
+# либо RUNWAYML_API_SECRET=... V2V_VENDOR=runway
+# либо KLING_API_KEY=... V2V_VENDOR=kling
 ```
