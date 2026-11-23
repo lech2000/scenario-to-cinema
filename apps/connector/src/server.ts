@@ -337,7 +337,8 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
 }
 
 export function createConnectorServer(opts: ConnectorOptions = {}): http.Server {
-  const workDir = opts.workDir ?? path.join(os.tmpdir(), "cinema-rpg-connector");
+  const workDir =
+    opts.workDir ?? process.env.WORK_DIR ?? path.join(os.tmpdir(), "cinema-rpg-connector");
   fs.mkdirSync(workDir, { recursive: true });
 
   const videoProvider = opts.videoProvider ?? createVideoProviderFromEnv();
@@ -707,6 +708,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      url.pathname = url.pathname.replace(/^\/cinema-rpg(?=\/|$)/, "") || "/";
       const method = req.method ?? "GET";
 
       if (method === "GET" && url.pathname === "/") {
@@ -738,9 +740,20 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         return serveMediaFile(req, res, path.join(workDir, safeName));
       }
 
-      if (opts.apiKey && url.pathname.startsWith("/v1/")) {
-        const auth = req.headers["x-cinema-api-key"];
-        if (auth !== opts.apiKey) {
+      const isFixarConnectorRoute =
+        url.pathname.startsWith("/v1/jobs") ||
+        url.pathname.startsWith("/v1/estimates") ||
+        url.pathname.startsWith("/v1/dice");
+      if (opts.apiKey && isFixarConnectorRoute) {
+        const bearer = req.headers.authorization?.startsWith("Bearer ")
+          ? req.headers.authorization.slice("Bearer ".length).trim()
+          : undefined;
+        const provided =
+          req.headers["x-cinema-api-key"] ??
+          req.headers["x-api-key"] ??
+          req.headers["x-auth-token"] ??
+          bearer;
+        if (provided !== opts.apiKey) {
           return sendJson(res, 401, { ok: false, error: "Invalid API key" });
         }
       }
@@ -1557,9 +1570,10 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT ?? 8787);
+  const host = process.env.HOST ?? "127.0.0.1";
   const server = createConnectorServer({ apiKey: process.env.CINEMA_ENGINE_API_KEY });
-  server.listen(port, "127.0.0.1", () => {
-    console.log(`Scenario-to-Cinema Studio & Connector: http://127.0.0.1:${port}`);
+  server.listen(port, host, () => {
+    console.log(`Scenario-to-Cinema Studio & Connector: http://${host}:${port}`);
     console.log(`  raea binary: ${findRaeaBinary() ?? "not found (TSX-only mode)"}`);
     console.log(`  ffmpeg:      ${findFfmpegBinary() ?? "not found"}`);
   });

@@ -27,8 +27,8 @@ spec:
     connectors:
       - name: cinema-engine-api
         type: http
-        endpoint: https://cinema-engine.example.com
-        endpoint_secret: CINEMA_ENGINE_ENDPOINT
+        endpoint: https://joe.tail54a262.ts.net:10000/cinema-rpg
+        endpoint_secret: CINEMA_ENGINE_API_KEY
         summary: >-
           Внешний асинхронный движок рендера 3D-превиза (raea), многоголосой
           озвучки (TTS) и облачной видеогенерации (V2V) по утверждённым шотам.
@@ -38,12 +38,12 @@ spec:
     - network:egress
 
   secrets:
-    - name: CINEMA_ENGINE_ENDPOINT
-      purpose: Адрес внешнего Cinema Engine API для рендера 3D-превиза и финального видео
-      required: true
     - name: CINEMA_ENGINE_API_KEY
       purpose: Ключ авторизации запросов дела во внешний Cinema Engine API
       required: true
+    - name: CINEMA_ENGINE_ENDPOINT
+      purpose: Пользовательский адрес внешнего Cinema Engine API при self-hosted развёртывании
+      required: false
 
   resources:
     timeout_seconds: 30

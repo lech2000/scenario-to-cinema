@@ -328,10 +328,13 @@ const SAMPLE_CHAPTER = \`Проклятие Серебряного Леса
 
 let sessionId = null;
 let lastAnimaticData = null;
+const API_BASE = window.location.pathname.replace(/\/index\.html$/, "").replace(/\/+$/, "");
+function apiUrl(p) { return API_BASE + p; }
+function mediaUrl(u) { return u && u.startsWith("/") ? API_BASE + u : u; }
 
 async function checkHealth() {
   try {
-    const r = await fetch("/health");
+    const r = await fetch(apiUrl("/health"));
     const d = await r.json();
     document.getElementById("healthBadge").textContent =
       (d.raeaAvailable ? "raea GPU: ON" : "raea: TSX-only") +
@@ -361,7 +364,7 @@ document.getElementById("startBtn").onclick = async () => {
   btn.disabled = true;
   document.getElementById("turnStatus").textContent = "Строим Библию мира…";
   try {
-    const res = await fetch("/v1/sessions", {
+    const res = await fetch(apiUrl("/v1/sessions"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -377,7 +380,7 @@ document.getElementById("startBtn").onclick = async () => {
     const hero = wb.characters[0];
 
     const refCards = (wb.characters || []).map((c) => {
-      const refUrl = c.refSheetUrls?.[0];
+      const refUrl = mediaUrl(c.refSheetUrls?.[0]);
       const img = refUrl ? '<img src="' + refUrl + '" alt="' + c.name + '" />' : "";
       return '<a class="ref-item" href="' + (refUrl || "#") + '" target="_blank" style="color:inherit;text-decoration:none">' +
         img + '<span><b>' + c.name + '</b><br/><span class="muted">' + c.role + '</span></span></a>';
@@ -426,7 +429,7 @@ async function submitTurn(text) {
   log.scrollTop = log.scrollHeight;
 
   try {
-    const res = await fetch("/v1/sessions/" + sessionId + "/turns", {
+    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/turns"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -462,16 +465,16 @@ async function submitTurn(text) {
     const pBox = document.getElementById("previzBox");
     if (data.media?.mp4Url) {
       const trackTag = data.media.vttUrl
-        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + data.media.vttUrl + '" default />'
+        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(data.media.vttUrl) + '" default />'
         : "";
-      pBox.innerHTML = '<video controls autoplay playsinline src="' + data.media.mp4Url + '">' + trackTag + '</video>';
+      pBox.innerHTML = '<video controls autoplay playsinline src="' + mediaUrl(data.media.mp4Url) + '">' + trackTag + '</video>';
     } else if (data.media?.pngUrl) {
-      pBox.innerHTML = '<img src="' + data.media.pngUrl + '" alt="3D Previz" />';
+      pBox.innerHTML = '<img src="' + mediaUrl(data.media.pngUrl) + '" alt="3D Previz" />';
     } else {
       pBox.textContent = "TSX скомпилирован (локальный raea отключён)";
     }
     const audioSec = data.shot.audio?.audioDurationSec ? data.shot.audio.audioDurationSec + " сек TTS · " : "";
-    const srtLink = data.media?.srtUrl ? ' · <a href="' + data.media.srtUrl + '" download style="color:var(--accent)">SRT</a>' : "";
+    const srtLink = data.media?.srtUrl ? ' · <a href="' + mediaUrl(data.media.srtUrl) + '" download style="color:var(--accent)">SRT</a>' : "";
     document.getElementById("previzMeta").innerHTML =
       "Шот " + data.shot.id + " · " + audioSec + data.shot.durationInFrames + " кадров · камера: " + data.shot.camera.mode + " · рендер: " + data.render.durationMs + " мс" + srtLink;
     document.getElementById("shotJson").textContent = JSON.stringify(data.shot, null, 2);
@@ -511,7 +514,7 @@ function updateEstimateCard(est, extraMeta) {
     ? (extraMeta.bytes / (1024 * 1024)).toFixed(2) + " МБ (лимит дела ФиксАР: 32 МБ)"
     : "обновится после сборки MP4";
   const subLinks = extraMeta?.srtUrl
-    ? '<br/>Субтитры и титры: <a href="' + extraMeta.srtUrl + '" download style="color:var(--accent)">Скачать .srt</a> · <a href="' + extraMeta.vttUrl + '" target="_blank" style="color:var(--accent)">WebVTT</a>'
+    ? '<br/>Субтитры и титры: <a href="' + mediaUrl(extraMeta.srtUrl) + '" download style="color:var(--accent)">Скачать .srt</a> · <a href="' + mediaUrl(extraMeta.vttUrl) + '" target="_blank" style="color:var(--accent)">WebVTT</a>'
     : "";
   document.getElementById("estimateCard").innerHTML =
     "<b>Смета ФиксАР:</b> " + est.priceCredits + " кредитов (~" + est.priceRubApprox + " ₽)<br/>" +
@@ -570,7 +573,7 @@ function renderCutEditor(episodeCut, droppedShotIds) {
       btn.disabled = true;
       document.getElementById("filmStatus").textContent = "Пересчитываем TTS, 3D-кадр и смету для " + sid + "…";
       try {
-        const res = await fetch("/v1/sessions/" + sessionId + "/shots/" + sid, {
+        const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/shots/" + sid), {
           method: "PATCH",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -600,7 +603,7 @@ function renderCutEditor(episodeCut, droppedShotIds) {
       btn.disabled = true;
       document.getElementById("filmStatus").textContent = "Удаляем шот " + sid + " из монтажа…";
       try {
-        const res = await fetch("/v1/sessions/" + sessionId + "/shots/" + sid, { method: "DELETE" });
+        const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/shots/" + sid), { method: "DELETE" });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "Не удалось удалить шот");
         renderCutEditor(data.episodeCut, []);
@@ -621,7 +624,7 @@ document.getElementById("showrunnerBtn").onclick = async () => {
   btn.disabled = true;
   document.getElementById("filmStatus").textContent = "AI Showrunner сжимает ходы в 3-актный эпизод…";
   try {
-    const res = await fetch("/v1/sessions/" + sessionId + "/showrunner", {
+    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/showrunner"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -649,7 +652,7 @@ document.getElementById("animaticBtn").onclick = async () => {
   document.getElementById("animaticBtn").disabled = true;
   document.getElementById("filmStatus").textContent = "Собираем 3D-аниматик с титрами (raea + FFmpeg) и смету…";
   try {
-    const res = await fetch("/v1/sessions/" + sessionId + "/animatic", {
+    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/animatic"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -665,9 +668,9 @@ document.getElementById("animaticBtn").onclick = async () => {
     const aBox = document.getElementById("animaticBox");
     if (data.animaticUrl) {
       const aTrack = data.vttUrl
-        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + data.vttUrl + '" default />'
+        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(data.vttUrl) + '" default />'
         : "";
-      aBox.innerHTML = '<video controls autoplay playsinline src="' + data.animaticUrl + '?t=' + Date.now() + '">' + aTrack + '</video>';
+      aBox.innerHTML = '<video controls autoplay playsinline src="' + mediaUrl(data.animaticUrl) + '?t=' + Date.now() + '">' + aTrack + '</video>';
     } else {
       aBox.textContent = data.concatNote || "Аниматик собран (без MP4).";
     }
@@ -712,14 +715,14 @@ function renderV2VQueue(job) {
   const masteredBlock = job.masteredMp4Url
     ? '<div style="margin-bottom:10px">' +
         '<div class="preview-box" style="margin-bottom:6px">' +
-          '<video controls autoplay playsinline src="' + job.masteredMp4Url + '?t=' + Date.now() + '">' +
-            (job.masteredVttUrl ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + job.masteredVttUrl + '" default />' : "") +
+          '<video controls autoplay playsinline src="' + mediaUrl(job.masteredMp4Url) + '?t=' + Date.now() + '">' +
+            (job.masteredVttUrl ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(job.masteredVttUrl) + '" default />' : "") +
           '</video>' +
         '</div>' +
         '<div class="muted"><b>Финальный V2V-фильм готов:</b> ' +
           ((job.masteredBytes || 0) / (1024 * 1024)).toFixed(2) + ' МБ (&lt;= 32 МБ) · ' +
-          '<a href="' + job.masteredMp4Url + '" download style="color:var(--accent)">Скачать MP4</a>' +
-          (job.masteredSrtUrl ? ' · <a href="' + job.masteredSrtUrl + '" download style="color:var(--accent)">SRT</a>' : "") +
+          '<a href="' + mediaUrl(job.masteredMp4Url) + '" download style="color:var(--accent)">Скачать MP4</a>' +
+          (job.masteredSrtUrl ? ' · <a href="' + mediaUrl(job.masteredSrtUrl) + '" download style="color:var(--accent)">SRT</a>' : "") +
         '</div>' +
       '</div>'
     : "";
@@ -742,7 +745,7 @@ async function rerollShot(shotId, extraPaymentGrantId) {
   try {
     const payload = { shotId };
     if (extraPaymentGrantId) payload.extraPaymentGrantId = extraPaymentGrantId;
-    const res = await fetch("/v1/sessions/" + sessionId + "/reroll", {
+    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/reroll"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -773,7 +776,7 @@ document.getElementById("approveBtn").onclick = async () => {
   document.getElementById("approveBtn").disabled = true;
   document.getElementById("filmStatus").textContent = "Запускаем утверждённый пошотовый V2V-рендер…";
   try {
-    const res = await fetch("/v1/sessions/" + sessionId + "/approve", {
+    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/approve"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
