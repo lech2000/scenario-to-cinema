@@ -10,10 +10,10 @@
   - `tests/` и `evals/` — обязательные фикстуры и оценки безопасности;
   - `scripts/package-pack.sh` — сборка `.tar.gz` + SHA-256 для GitHub Release и `/pak/kabinet/`.
 - `packages/shared/` — единые Zod/TypeScript-контракты (`WorldBible`, `GameEvent`, `ShotSpec`, `EpisodeCut`, `CostEstimate`, `RenderJob`).
-- `packages/engine/` — World Builder (разбор главы книги 1–20 стр.), ИИ-Мастер с механикой `2d6`, генератор `ShotSpec` и клиент OpenAI-совместимых LLM (с офлайн-фолбэком для запуска без ключей).
+- `packages/engine/` — World Builder (разбор главы книги 1–20 стр.), ИИ-Мастер с механикой `2d6`, **AI Showrunner** (`buildShowrunnerCut` — драматургическое сжатие длинной сессии в 3-актный сценарий 2–5 мин с титрами `EpisodeCredits`), генератор `ShotSpec` и клиент OpenAI-совместимых LLM (с офлайн-фолбэком для запуска без ключей).
 - `packages/raea-dsl/` — детерминированный компилятор `ShotSpec + WorldBible → raea TSX` (14-сегментные шарнирные фигуры персонажей, нативный `<Character>`, пресеты `<Look mode="paint" | "cartoon">` и спайк `src/spike-tavern-duel.ts`).
 - `packages/providers/` — Audio-First синтез речи по ролям (`MultiTierRoleAudioProvider`: OpenAI TTS / локальный macOS `say -v Milena` с тембровым разделением ролей / кроссплатформенный WAV-фолбэк), авто-тайминг кадров через `ffprobe`, генератор `.srt`/`.vtt` субтитров, SFX + ducking эмбиента, облачный Video-to-Video провайдер (`CloudV2VProvider`: `fal.ai` / `Runway` / `Kling` с авто-генерацией SVG референс-листов персонажей `ensureCharacterReferenceSheets` и контролем квот `reroll`), а также `BillingAdapter` и смета ФиксАР.
-- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор (`Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → `ffmpeg` микширование AAC + `mov_text` субтитров, пошотовая очередь V2V `shotStates`, пересъёмка отдельных шотов `/v1/jobs/:jobId/reroll` и `/v1/sessions/:sessionId/reroll` с квотами тарифа, проверка утверждения аниматика, `payment_grant_id` и идемпотентности).
+- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор: `Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → интерактивный редактор шотов аниматика до оплаты (`POST /showrunner`, `PATCH/DELETE /shots/:shotId`, `PATCH /credits` с пересчётом TTS и сметы) → генерация финальных титров MP4 (`renderCreditsClipMp4`) → пошотовая очередь V2V `shotStates` и пересъёмка шотов (`reroll`).
 - `CODER_SETUP.md` — пошаговая настройка дела `case_f6db507d967c49d9` и внешнего кодера площадки через MCP.
 
 ## Быстрый старт

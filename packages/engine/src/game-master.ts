@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import { z } from "zod";
 import {
   type DiceRoll,
+  type EpisodeCut,
   type GameEvent,
   type ShotSpec,
   type WorldBible,
@@ -18,6 +19,7 @@ export interface RuntimeSessionState {
   actorZones: Record<string, string>;
   events: GameEvent[];
   shots: ShotSpec[];
+  episodeCut?: EpisodeCut;
   shotMedia: Record<
     string,
     {
@@ -309,6 +311,7 @@ export async function processGameTurn(params: {
 
   session.events.push(event);
   session.shots.push(shot);
+  session.episodeCut = undefined;
   session.animaticApproved = false;
 
   return { event, shot, suggestedChoices, source };

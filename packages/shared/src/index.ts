@@ -213,11 +213,41 @@ export const ShotSpecSchema = z.object({
 });
 export type ShotSpec = z.infer<typeof ShotSpecSchema>;
 
+export const ShowrunnerBeatSchema = z.object({
+  shotId: z.string().min(1),
+  act: z.union([z.literal(1), z.literal(2), z.literal(3)]),
+  actTitle: z.string().min(1),
+  dramaticFunction: z.enum([
+    "setup",
+    "inciting_incident",
+    "rising_action",
+    "climax",
+    "resolution",
+  ]),
+  summary: z.string().min(1),
+});
+export type ShowrunnerBeat = z.infer<typeof ShowrunnerBeatSchema>;
+
+export const EpisodeCreditsSchema = z.object({
+  enabled: z.boolean().default(true),
+  episodeTitle: z.string().min(1),
+  subtitle: z.string().default("Интерактивный эпизод · Книга в кино"),
+  starring: z.array(z.string()).default([]),
+  directedBy: z.string().default("Игрок и AI Showrunner · ФиксАР"),
+  footerNote: z.string().default("cinema-rpg/book-to-film-rpg"),
+  durationSec: z.number().min(2).max(12).default(4),
+});
+export type EpisodeCredits = z.infer<typeof EpisodeCreditsSchema>;
+
 export const EpisodeCutSchema = z.object({
   id: z.string().min(1),
   caseId: z.string().min(1),
   worldBibleId: z.string().min(1),
   tariffTier: TariffTierSchema,
+  title: z.string().min(1).optional(),
+  logline: z.string().min(1).optional(),
+  beats: z.array(ShowrunnerBeatSchema).optional(),
+  credits: EpisodeCreditsSchema.optional(),
   shots: z.array(ShotSpecSchema).min(1),
   animaticApproved: z.boolean().default(false),
 });
