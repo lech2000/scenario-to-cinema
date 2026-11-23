@@ -73,6 +73,8 @@ export const CharacterProfileSchema = z.object({
     "cloaked",
     "creature_small",
   ]),
+  /** Optional registered raea/character Anny body id (e.g. "adult", "kid"); falls back to articulated RiggedCharacter */
+  raeaBodyId: z.string().min(1).optional(),
   accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   voiceId: z.string().min(1),
   refSheetUrls: z.array(z.string().url()).default([]),
@@ -153,6 +155,7 @@ export const AnimationClipIdSchema = z.enum([
   "sit",
   "inspect",
 ]);
+export type AnimationClipId = z.infer<typeof AnimationClipIdSchema>;
 
 export const CameraModeSchema = z.enum([
   "establishing",
@@ -162,6 +165,7 @@ export const CameraModeSchema = z.enum([
   "dolly_track",
   "low_angle_hero",
 ]);
+export type CameraMode = z.infer<typeof CameraModeSchema>;
 
 export const ShotActorActionSchema = z.object({
   characterId: z.string().min(1),
