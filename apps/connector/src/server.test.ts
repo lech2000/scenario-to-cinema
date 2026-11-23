@@ -176,8 +176,19 @@ test("interactive session runs book ingest -> 2d6 turn -> TSX compile -> animati
       }),
     });
     assert.equal(sessRes.status, 201);
-    const sessJson = (await sessRes.json()) as { session: { sessionId: string } };
+    const sessJson = (await sessRes.json()) as {
+      session: {
+        sessionId: string;
+        worldBible: { characters: Array<{ refSheetUrls: string[] }> };
+      };
+    };
     const sid = sessJson.session.sessionId;
+    const firstRefUrl = sessJson.session.worldBible.characters[0]?.refSheetUrls[0];
+    assert.ok(firstRefUrl?.startsWith("/media/ref_"));
+    const refSvgRes = await fetch(`${base}${firstRefUrl}`);
+    assert.equal(refSvgRes.status, 200);
+    assert.match(refSvgRes.headers.get("content-type") ?? "", /image\/svg\+xml/);
+    assert.match(await refSvgRes.text(), /<svg/);
 
     const turnRes = await fetch(`${base}/v1/sessions/${sid}/turns`, {
       method: "POST",
@@ -233,6 +244,135 @@ test("interactive session runs book ingest -> 2d6 turn -> TSX compile -> animati
       }),
     });
     assert.equal(appRes.status, 202);
+    const appJson = (await appRes.json()) as {
+      job: {
+        jobId: string;
+        includedRerolls: number;
+        usedFreeRerolls: number;
+        shotStates: Array<{ shotId: string; characterRefUrls: string[]; seed: number }>;
+      };
+    };
+    assert.equal(appJson.job.includedRerolls, 3);
+    assert.equal(appJson.job.usedFreeRerolls, 0);
+    assert.equal(appJson.job.shotStates.length, 1);
+    assert.ok(appJson.job.shotStates[0].characterRefUrls.length >= 1);
+
+    const sessRerollRes = await fetch(`${base}/v1/sessions/${sid}/reroll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shotId: turnJson.shot.id }),
+    });
+    assert.equal(sessRerollRes.status, 200);
+    const sessRerollJson = (await sessRerollRes.json()) as {
+      rerolledShot: { rerollCount: number; seed: number };
+      job: { usedFreeRerolls: number };
+    };
+    assert.equal(sessRerollJson.rerolledShot.rerollCount, 1);
+    assert.notEqual(sessRerollJson.rerolledShot.seed, appJson.job.shotStates[0].seed);
+    assert.equal(sessRerollJson.job.usedFreeRerolls, 1);
+  } finally {
+    server.close();
+  }
+});
+
+test("per-shot V2V queue enforces tariff free-reroll quota and extra payment grant on exhaustion", async () => {
+  const server = createConnectorServer({ enableLiveRaea: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+
+  const shot2 = {
+    ...sampleShot,
+    id: "shot_02",
+    v2vPrompt: "Mira draws her silver blade",
+  };
+
+  try {
+    const startRes = await fetch(`${base}/v1/jobs/final-film`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        caseId: "case_f6db507d967c49d9",
+        idempotencyKey: "ep_reroll_quota_test",
+        paymentGrantId: "grant_paid_episode",
+        episodeCut: {
+          id: "ep_reroll",
+          caseId: "case_f6db507d967c49d9",
+          worldBibleId: "wb_1",
+          tariffTier: "po_episode_stylized",
+          shots: [sampleShot, shot2],
+          animaticApproved: true,
+        },
+        worldBible: sampleWorld,
+      }),
+    });
+    assert.equal(startRes.status, 202);
+    const startJson = (await startRes.json()) as {
+      job: {
+        jobId: string;
+        progressPct: number;
+        includedRerolls: number;
+        usedFreeRerolls: number;
+        shotStates: Array<{
+          shotId: string;
+          status: string;
+          rerollCount: number;
+          characterRefUrls: string[];
+        }>;
+      };
+    };
+    const jobId = startJson.job.jobId;
+    assert.equal(startJson.job.progressPct, 100);
+    assert.equal(startJson.job.includedRerolls, 3);
+    assert.equal(startJson.job.shotStates.length, 2);
+    assert.ok(startJson.job.shotStates[0].characterRefUrls[0]?.startsWith("/media/ref_"));
+
+    // Consume all 3 included free rerolls on shot_02
+    for (let i = 1; i <= 3; i++) {
+      const r = await fetch(`${base}/v1/jobs/${jobId}/reroll`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ shotId: "shot_02" }),
+      });
+      assert.equal(r.status, 200);
+      const body = (await r.json()) as {
+        rerolledShot: { rerollCount: number };
+        job: { usedFreeRerolls: number; extraRerollCreditsCharged: number };
+      };
+      assert.equal(body.rerolledShot.rerollCount, i);
+      assert.equal(body.job.usedFreeRerolls, i);
+      assert.equal(body.job.extraRerollCreditsCharged, 0);
+    }
+
+    // 4th reroll without extraPaymentGrantId -> 402 Payment Required (120 credits)
+    const unpaid4th = await fetch(`${base}/v1/jobs/${jobId}/reroll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ shotId: "shot_02" }),
+    });
+    assert.equal(unpaid4th.status, 402);
+    const unpaidBody = (await unpaid4th.json()) as { extraCreditsRequired: number };
+    assert.equal(unpaidBody.extraCreditsRequired, 120);
+
+    // 4th reroll WITH valid extraPaymentGrantId -> 200 OK & charges 120 extra credits
+    const paid4th = await fetch(`${base}/v1/jobs/${jobId}/reroll`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        shotId: "shot_02",
+        promptOverride: "Close-up of silver blade gleaming in candlelight",
+        extraPaymentGrantId: "grant_extra_001",
+      }),
+    });
+    assert.equal(paid4th.status, 200);
+    const paidBody = (await paid4th.json()) as {
+      rerolledShot: { rerollCount: number; prompt: string };
+      job: { usedFreeRerolls: number; extraRerollCreditsCharged: number };
+    };
+    assert.equal(paidBody.rerolledShot.rerollCount, 4);
+    assert.match(paidBody.rerolledShot.prompt, /silver blade gleaming/);
+    assert.equal(paidBody.job.usedFreeRerolls, 3);
+    assert.equal(paidBody.job.extraRerollCreditsCharged, 120);
   } finally {
     server.close();
   }

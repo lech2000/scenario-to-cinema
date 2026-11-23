@@ -8,8 +8,10 @@ import {
   type DiceRoll,
   type GameEvent,
   type RenderJob,
+  type ShotRenderState,
   type ShotSpec,
   type SubtitleCue,
+  type TariffTier,
   type WorldBible,
   EpisodeCutSchema,
   ShotSpecSchema,
@@ -28,16 +30,19 @@ import {
 import { compileShotToRaeaTsx } from "@cinema-rpg/raea-dsl";
 import {
   AUDIO_SAMPLE_RATE,
+  TARIFF_FREE_REROLLS,
   type AudioProvider,
   type BillingAdapter,
   type RoleLineInput,
   type VideoProvider,
   ExternalGrantBillingAdapter,
-  MockVideoProvider,
   MultiTierRoleAudioProvider,
+  createVideoProviderFromEnv,
   decodeMonoWavSamples,
   encodeMonoWav,
+  ensureCharacterReferenceSheets,
   estimateEpisodeCost,
+  evaluateRerollAllowance,
   formatSubtitlesSrt,
   formatSubtitlesWebVtt,
   mergeEpisodeSubtitles,
@@ -80,6 +85,13 @@ const FinalFilmRequestSchema = z.object({
   worldBible: WorldBibleSchema,
 });
 
+const RerollShotRequestSchema = z.object({
+  shotId: z.string().min(1),
+  promptOverride: z.string().min(1).max(1000).optional(),
+  seed: z.number().int().min(0).optional(),
+  extraPaymentGrantId: z.string().min(1).optional(),
+});
+
 const CreateSessionRequestSchema = z.object({
   scenarioText: z.string().min(10).max(120_000),
   stylePreset: StylePresetIdSchema.default("arcane_3d"),
@@ -103,6 +115,13 @@ const ApproveSessionRequestSchema = z.object({
   paymentGrantId: z.string().min(1),
 });
 
+interface JobContext {
+  job: RenderJob;
+  shots: ShotSpec[];
+  worldBible: WorldBible;
+  previzByShotId: Record<string, string>;
+}
+
 export interface ConnectorOptions {
   apiKey?: string;
   videoProvider?: VideoProvider;
@@ -121,10 +140,21 @@ export function roll2d6(stat: string, modifier: number): DiceRoll {
   return { stat, dice: [d1, d2], modifier, total, outcome };
 }
 
+function resolveShotCharacterRefs(shot: ShotSpec, wb: WorldBible): string[] {
+  const actorIds = new Set(shot.actors.map((a) => a.characterId));
+  const refs: string[] = [];
+  for (const char of wb.characters) {
+    if (actorIds.has(char.id)) {
+      for (const url of char.refSheetUrls) {
+        if (!refs.includes(url)) refs.push(url);
+      }
+    }
+  }
+  return refs;
+}
+
 function buildRoleLinesForTurn(event: GameEvent, wb: WorldBible): RoleLineInput[] {
   const lines: RoleLineInput[] = [];
-
-  // Extract concise narrator beat (before direct quote if present)
   const narratorBeat = event.narrativeText.split("«")[0]?.trim();
   if (narratorBeat) {
     lines.push({
@@ -141,7 +171,8 @@ function buildRoleLinesForTurn(event: GameEvent, wb: WorldBible): RoleLineInput[
     const profile = wb.characters.find((c) => c.id === dlg.speakerId);
     lines.push({
       speakerId: dlg.speakerId,
-      speakerName: profile?.name ?? (dlg.speakerId === "narrator" ? "Рассказчик" : dlg.speakerId),
+      speakerName:
+        profile?.name ?? (dlg.speakerId === "narrator" ? "Рассказчик" : dlg.speakerId),
       role: profile?.role ?? "narrator",
       voiceId: profile?.voiceId ?? "voice_ru_narrator",
       text: dlg.text,
@@ -176,13 +207,15 @@ function serveMediaFile(
       ? "video/mp4"
       : ext === ".png"
         ? "image/png"
-        : ext === ".wav"
-          ? "audio/wav"
-          : ext === ".vtt"
-            ? "text/vtt; charset=utf-8"
-            : ext === ".srt"
-              ? "text/plain; charset=utf-8"
-              : "application/octet-stream";
+        : ext === ".svg"
+          ? "image/svg+xml"
+          : ext === ".wav"
+            ? "audio/wav"
+            : ext === ".vtt"
+              ? "text/vtt; charset=utf-8"
+              : ext === ".srt"
+                ? "text/plain; charset=utf-8"
+                : "application/octet-stream";
 
   const range = req.headers.range;
   if (range && (ext === ".mp4" || ext === ".wav")) {
@@ -231,16 +264,189 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
   const workDir = opts.workDir ?? path.join(os.tmpdir(), "cinema-rpg-connector");
   fs.mkdirSync(workDir, { recursive: true });
 
-  const videoProvider = opts.videoProvider ?? new MockVideoProvider();
+  const videoProvider = opts.videoProvider ?? createVideoProviderFromEnv();
   const audioProvider =
     opts.audioProvider ?? new MultiTierRoleAudioProvider({ workDir });
   const billing = opts.billingAdapter ?? new ExternalGrantBillingAdapter();
   const llmClient = opts.llmClient ?? new OpenAICompatibleLLMClient();
   const enableLiveRaea = opts.enableLiveRaea ?? true;
 
-  const jobs = new Map<string, RenderJob>();
+  const jobs = new Map<string, JobContext>();
   const idempotencyIndex = new Map<string, string>();
   const sessions = new Map<string, RuntimeSessionState>();
+  const sessionFinalJobId = new Map<string, string>();
+
+  async function runPerShotV2VQueue(params: {
+    jobId: string;
+    caseId: string;
+    idempotencyKey: string;
+    tariffTier: TariffTier;
+    shots: ShotSpec[];
+    worldBible: WorldBible;
+    previzByShotId: Record<string, string>;
+  }): Promise<JobContext> {
+    const includedRerolls = TARIFF_FREE_REROLLS[params.tariffTier];
+    const shotStates: ShotRenderState[] = params.shots.map((s, idx) => ({
+      shotId: s.id,
+      status: "queued",
+      rerollCount: 0,
+      seed: 1000 + idx,
+      characterRefUrls: resolveShotCharacterRefs(s, params.worldBible),
+      prompt: `${params.worldBible.globalStylePrompt}. ${s.v2vPrompt}`,
+    }));
+
+    const now = new Date().toISOString();
+    const job: RenderJob = {
+      jobId: params.jobId,
+      kind: "final_film",
+      caseId: params.caseId,
+      idempotencyKey: params.idempotencyKey,
+      tariffTier: params.tariffTier,
+      status: "rendering_v2v",
+      progressPct: 0,
+      etaSeconds: params.shots.length * 15,
+      shotStates,
+      includedRerolls,
+      usedFreeRerolls: 0,
+      extraRerollCreditsCharged: 0,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    const ctx: JobContext = {
+      job,
+      shots: params.shots,
+      worldBible: params.worldBible,
+      previzByShotId: params.previzByShotId,
+    };
+    jobs.set(params.jobId, ctx);
+
+    for (let i = 0; i < params.shots.length; i++) {
+      const shot = params.shots[i];
+      const st = shotStates[i];
+      st.status = "rendering_v2v";
+      const loc = params.worldBible.locations.find((l) => l.id === shot.locationId);
+      const previzPath =
+        params.previzByShotId[shot.id] ?? path.join(workDir, `${params.jobId}_${shot.id}.tsx`);
+
+      const { providerJobId } = await videoProvider.renderShotV2V({
+        previzVideoPath: previzPath,
+        prompt: st.prompt ?? shot.v2vPrompt,
+        characterRefUrls: st.characterRefUrls,
+        locationRefUrl: loc?.moodboardUrl,
+        durationSec: Math.ceil(shot.durationInFrames / shot.fps),
+        aspectRatio: "16:9",
+        stylePreset: params.worldBible.stylePreset,
+        seed: st.seed,
+      });
+      st.providerJobId = providerJobId;
+
+      const polled = await videoProvider.pollJob(providerJobId);
+      if (polled.status === "done") {
+        st.status = "done";
+        st.videoUrl = polled.videoUrl;
+      } else if (polled.status === "failed") {
+        st.status = "failed";
+        st.error = polled.error;
+      } else {
+        st.status = "rendering_v2v";
+      }
+
+      const completedCount = shotStates.filter((s) => s.status === "done").length;
+      job.progressPct = Math.round((completedCount / shotStates.length) * 100);
+      job.updatedAt = new Date().toISOString();
+    }
+
+    const allDone = shotStates.every((s) => s.status === "done");
+    const anyFailed = shotStates.some((s) => s.status === "failed");
+    job.status = allDone ? "done" : anyFailed ? "failed" : "rendering_v2v";
+    job.etaSeconds = allDone ? 0 : 90;
+    job.artifactUrl = shotStates[shotStates.length - 1]?.videoUrl;
+    job.updatedAt = new Date().toISOString();
+    return ctx;
+  }
+
+  async function handleRerollShot(
+    ctx: JobContext,
+    rawBody: unknown
+  ): Promise<{ status: number; body: unknown }> {
+    const parsed = RerollShotRequestSchema.parse(rawBody);
+    const { job } = ctx;
+    const tariffTier = job.tariffTier ?? "po_episode_stylized";
+    const shotIdx = (job.shotStates ?? []).findIndex((s) => s.shotId === parsed.shotId);
+    if (shotIdx < 0) {
+      return { status: 404, body: { ok: false, error: `Shot "${parsed.shotId}" not found in job` } };
+    }
+
+    const allowance = evaluateRerollAllowance({
+      tariffTier,
+      includedRerolls: job.includedRerolls ?? TARIFF_FREE_REROLLS[tariffTier],
+      usedFreeRerolls: job.usedFreeRerolls ?? 0,
+      extraPaymentGrantId: parsed.extraPaymentGrantId,
+    });
+    if (!allowance.allowed) {
+      return {
+        status: 402,
+        body: {
+          ok: false,
+          error: allowance.reason,
+          extraCreditsRequired: allowance.extraCreditsCharged,
+        },
+      };
+    }
+
+    const shot = ctx.shots[shotIdx];
+    const st = job.shotStates![shotIdx];
+    const newSeed = parsed.seed ?? (st.seed ?? 1000) + st.rerollCount + 101;
+    const prompt =
+      parsed.promptOverride ?? `${ctx.worldBible.globalStylePrompt}. ${shot.v2vPrompt}`;
+    const loc = ctx.worldBible.locations.find((l) => l.id === shot.locationId);
+    const previzPath =
+      ctx.previzByShotId[shot.id] ?? path.join(workDir, `${job.jobId}_${shot.id}.tsx`);
+
+    const { providerJobId } = await videoProvider.renderShotV2V({
+      previzVideoPath: previzPath,
+      prompt,
+      characterRefUrls: st.characterRefUrls,
+      locationRefUrl: loc?.moodboardUrl,
+      durationSec: Math.ceil(shot.durationInFrames / shot.fps),
+      aspectRatio: "16:9",
+      stylePreset: ctx.worldBible.stylePreset,
+      seed: newSeed,
+    });
+    const polled = await videoProvider.pollJob(providerJobId);
+
+    st.providerJobId = providerJobId;
+    st.seed = newSeed;
+    st.prompt = prompt;
+    st.rerollCount += 1;
+    st.status = polled.status === "done" ? "done" : polled.status === "failed" ? "failed" : "rendering_v2v";
+    st.videoUrl = polled.videoUrl;
+    st.error = polled.error;
+
+    if (allowance.isFreeReroll) {
+      job.usedFreeRerolls = (job.usedFreeRerolls ?? 0) + 1;
+    } else {
+      job.extraRerollCreditsCharged =
+        (job.extraRerollCreditsCharged ?? 0) + allowance.extraCreditsCharged;
+    }
+
+    const doneCount = job.shotStates!.filter((s) => s.status === "done").length;
+    job.progressPct = Math.round((doneCount / job.shotStates!.length) * 100);
+    job.status = doneCount === job.shotStates!.length ? "done" : "rendering_v2v";
+    job.artifactUrl = st.videoUrl ?? job.artifactUrl;
+    job.updatedAt = new Date().toISOString();
+
+    return {
+      status: 200,
+      body: {
+        ok: true,
+        rerolledShot: st,
+        allowance,
+        job,
+      },
+    };
+  }
 
   return http.createServer(async (req, res) => {
     try {
@@ -269,7 +475,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
       }
 
       const mediaMatch = url.pathname.match(
-        /^\/media\/([a-zA-Z0-9_.-]+\.(?:png|mp4|wav|srt|vtt))$/
+        /^\/media\/([a-zA-Z0-9_.-]+\.(?:png|svg|mp4|wav|srt|vtt))$/
       );
       if (method === "GET" && mediaMatch) {
         const safeName = path.basename(mediaMatch[1]);
@@ -283,7 +489,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
       }
 
-      // ── Interactive Prototype Sessions (Book -> WorldBible -> Audio-First 2d6 -> raea) ──
+      // ── Interactive Prototype Sessions ────────────────────────────────────
       if (method === "POST" && url.pathname === "/v1/sessions") {
         const parsed = CreateSessionRequestSchema.parse(await readJsonBody(req));
         const { worldBible, source } = await ingestScenarioText({
@@ -293,6 +499,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           title: parsed.title,
           llm: llmClient,
         });
+        ensureCharacterReferenceSheets({ worldBible, outDir: workDir });
+
         const session = createInitialSession({
           worldBible,
           scenarioText: parsed.scenarioText,
@@ -327,7 +535,6 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           "_"
         );
 
-        // 1. AUDIO-FIRST: synthesize multi-role dialogue + SFX + subtitles BEFORE 3D render
         const roleLines = buildRoleLinesForTurn(turn.event, session.worldBible);
         const audioTrack = await synthesizeTurnAudioTrack({
           outDir: workDir,
@@ -338,7 +545,6 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           provider: audioProvider,
         });
 
-        // 2. FRAME LOCK: lock raea ShotSpec durationInFrames to measured audio length
         turn.shot.durationInFrames = audioTrack.durationInFrames;
         turn.shot.audio = {
           ...(turn.shot.audio ?? { sfxTags: [] }),
@@ -347,7 +553,6 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           subtitles: audioTrack.cues,
         };
 
-        // 3. Compile frame-locked ShotSpec -> raea TSX & render 3D clip
         const tsx = compileShotToRaeaTsx(turn.shot, session.worldBible);
         const tsxPath = path.join(workDir, `${baseName}.tsx`);
         fs.writeFileSync(tsxPath, tsx, "utf-8");
@@ -366,7 +571,6 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
               note: "Live raea rendering disabled for this server instance.",
             };
 
-        // 4. Mux multi-role audio + soft Russian subtitles into the rendered MP4
         if (render.mp4File) {
           await muxVideoWithAudioAndSubs({
             mp4Path: path.join(workDir, render.mp4File),
@@ -472,7 +676,6 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           }
         }
 
-        // Build Episode-wide master WAV + merged SRT & WebVTT subtitles
         const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
         const epBase = `${session.sessionId}_animatic`;
         const epSrtFile = `${epBase}.srt`;
@@ -553,37 +756,42 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
 
         session.animaticApproved = true;
-        const firstShot: ShotSpec = session.shots[0];
-        const previzPath =
-          session.animaticUrl ??
-          session.shotMedia[firstShot.id]?.mp4Url ??
-          `${session.sessionId}_animatic.mp4`;
-        const { providerJobId } = await videoProvider.renderShotV2V({
-          previzVideoPath: previzPath,
-          prompt: `${session.worldBible.globalStylePrompt}. ${firstShot.v2vPrompt}`,
-          characterRefUrls: session.worldBible.characters.flatMap((c) => c.refSheetUrls),
-          durationSec: Math.ceil(
-            session.shots.reduce((sum, s) => sum + s.durationInFrames / s.fps, 0)
-          ),
-          aspectRatio: "16:9",
-          stylePreset: session.worldBible.stylePreset,
-        });
-        const polled = await videoProvider.pollJob(providerJobId);
-        const now = new Date().toISOString();
-        const job: RenderJob = {
-          jobId: `job_${crypto.randomBytes(8).toString("hex")}`,
-          kind: "final_film",
+        const jobId = `job_${crypto.randomBytes(8).toString("hex")}`;
+        const previzByShotId: Record<string, string> = {};
+        for (const s of session.shots) {
+          const media = session.shotMedia[s.id];
+          previzByShotId[s.id] = media?.mp4Url
+            ? path.join(workDir, path.basename(media.mp4Url))
+            : media?.tsxPath ?? `${session.sessionId}_${s.id}.mp4`;
+        }
+
+        const ctx = await runPerShotV2VQueue({
+          jobId,
           caseId: session.caseId,
           idempotencyKey: `${episodeCutId}_${parsed.tariffTier}`,
-          status: polled.status === "done" ? "done" : "rendering_v2v",
-          progressPct: polled.status === "done" ? 100 : 20,
-          etaSeconds: polled.status === "done" ? 0 : 180,
-          artifactUrl: polled.videoUrl,
-          createdAt: now,
-          updatedAt: now,
-        };
-        jobs.set(job.jobId, job);
-        return sendJson(res, 202, { ok: true, job });
+          tariffTier: parsed.tariffTier,
+          shots: session.shots,
+          worldBible: session.worldBible,
+          previzByShotId,
+        });
+        sessionFinalJobId.set(session.sessionId, jobId);
+        return sendJson(res, 202, { ok: true, job: ctx.job });
+      }
+
+      const sessionRerollMatch = url.pathname.match(
+        /^\/v1\/sessions\/(sess_[a-f0-9]+)\/reroll$/
+      );
+      if (method === "POST" && sessionRerollMatch) {
+        const jobId = sessionFinalJobId.get(sessionRerollMatch[1]);
+        const ctx = jobId ? jobs.get(jobId) : undefined;
+        if (!ctx) {
+          return sendJson(res, 404, {
+            ok: false,
+            error: "Сначала утвердите аниматик и запустите V2V-рендер.",
+          });
+        }
+        const result = await handleRerollShot(ctx, await readJsonBody(req));
+        return sendJson(res, result.status, result.body);
       }
 
       // ── Core FixAR Connector Endpoints ────────────────────────────────────
@@ -602,7 +810,11 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         const parsed = LivePrevizRequestSchema.parse(await readJsonBody(req));
         const existingId = idempotencyIndex.get(parsed.idempotencyKey);
         if (existingId && jobs.has(existingId)) {
-          return sendJson(res, 200, { ok: true, job: jobs.get(existingId), deduplicated: true });
+          return sendJson(res, 200, {
+            ok: true,
+            job: jobs.get(existingId)!.job,
+            deduplicated: true,
+          });
         }
 
         const tsx = compileShotToRaeaTsx(parsed.shot, parsed.worldBible);
@@ -637,7 +849,12 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           createdAt: now,
           updatedAt: now,
         };
-        jobs.set(jobId, job);
+        jobs.set(jobId, {
+          job,
+          shots: [parsed.shot],
+          worldBible: parsed.worldBible,
+          previzByShotId: { [parsed.shot.id]: tsxPath },
+        });
         idempotencyIndex.set(parsed.idempotencyKey, jobId);
         return sendJson(res, 202, { ok: true, job });
       }
@@ -653,7 +870,11 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
 
         const existingId = idempotencyIndex.get(parsed.idempotencyKey);
         if (existingId && jobs.has(existingId)) {
-          return sendJson(res, 200, { ok: true, job: jobs.get(existingId), deduplicated: true });
+          return sendJson(res, 200, {
+            ok: true,
+            job: jobs.get(existingId)!.job,
+            deduplicated: true,
+          });
         }
 
         const grant = await billing.verifyPaymentGrant({
@@ -666,48 +887,48 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           return sendJson(res, 402, { ok: false, error: grant.reason });
         }
 
+        ensureCharacterReferenceSheets({ worldBible: parsed.worldBible, outDir: workDir });
+
         const jobId = `job_${crypto.randomBytes(8).toString("hex")}`;
-        const firstShot = parsed.episodeCut.shots[0];
-        const tsx = compileShotToRaeaTsx(firstShot, parsed.worldBible);
-        const tsxPath = path.join(workDir, `${jobId}_${firstShot.id}.tsx`);
-        fs.writeFileSync(tsxPath, tsx, "utf-8");
+        const previzByShotId: Record<string, string> = {};
+        for (const s of parsed.episodeCut.shots) {
+          const tsx = compileShotToRaeaTsx(s, parsed.worldBible);
+          const tsxPath = path.join(workDir, `${jobId}_${s.id}.tsx`);
+          fs.writeFileSync(tsxPath, tsx, "utf-8");
+          previzByShotId[s.id] = tsxPath;
+        }
 
-        const { providerJobId } = await videoProvider.renderShotV2V({
-          previzVideoPath: tsxPath,
-          prompt: `${parsed.worldBible.globalStylePrompt}. ${firstShot.v2vPrompt}`,
-          characterRefUrls: parsed.worldBible.characters.flatMap((c) => c.refSheetUrls),
-          durationSec: Math.ceil(firstShot.durationInFrames / firstShot.fps),
-          aspectRatio: "16:9",
-          stylePreset: parsed.worldBible.stylePreset,
-        });
-        const polled = await videoProvider.pollJob(providerJobId);
-
-        const now = new Date().toISOString();
-        const job: RenderJob = {
+        const ctx = await runPerShotV2VQueue({
           jobId,
-          kind: "final_film",
           caseId: parsed.caseId,
           idempotencyKey: parsed.idempotencyKey,
-          status: polled.status === "done" ? "done" : "rendering_v2v",
-          progressPct: polled.status === "done" ? 100 : 15,
-          etaSeconds: polled.status === "done" ? 0 : 180,
-          generatedTsxPath: tsxPath,
-          artifactUrl: polled.videoUrl,
-          createdAt: now,
-          updatedAt: now,
-        };
-        jobs.set(jobId, job);
+          tariffTier: parsed.episodeCut.tariffTier,
+          shots: parsed.episodeCut.shots,
+          worldBible: parsed.worldBible,
+          previzByShotId,
+        });
+        ctx.job.generatedTsxPath = previzByShotId[parsed.episodeCut.shots[0].id];
         idempotencyIndex.set(parsed.idempotencyKey, jobId);
-        return sendJson(res, 202, { ok: true, job });
+        return sendJson(res, 202, { ok: true, job: ctx.job });
+      }
+
+      const jobRerollMatch = url.pathname.match(/^\/v1\/jobs\/(job_[a-f0-9]+)\/reroll$/);
+      if (method === "POST" && jobRerollMatch) {
+        const ctx = jobs.get(jobRerollMatch[1]);
+        if (!ctx) {
+          return sendJson(res, 404, { ok: false, error: "Job not found" });
+        }
+        const result = await handleRerollShot(ctx, await readJsonBody(req));
+        return sendJson(res, result.status, result.body);
       }
 
       const jobMatch = url.pathname.match(/^\/v1\/jobs\/(job_[a-f0-9]+)$/);
       if (method === "GET" && jobMatch) {
-        const job = jobs.get(jobMatch[1]);
-        if (!job) {
+        const ctx = jobs.get(jobMatch[1]);
+        if (!ctx) {
           return sendJson(res, 404, { ok: false, error: "Job not found" });
         }
-        return sendJson(res, 200, { ok: true, job });
+        return sendJson(res, 200, { ok: true, job: ctx.job });
       }
 
       return sendJson(res, 404, { ok: false, error: "Not found" });

@@ -57,7 +57,7 @@ export const LocationBlueprintSchema = z.object({
   ]),
   floorMaterial: z.string().default("#2b2620"),
   zones: z.array(SpatialZoneSchema).min(1),
-  moodboardUrl: z.string().url().optional(),
+  moodboardUrl: z.string().min(1).optional(),
 });
 export type LocationBlueprint = z.infer<typeof LocationBlueprintSchema>;
 
@@ -77,7 +77,7 @@ export const CharacterProfileSchema = z.object({
   raeaBodyId: z.string().min(1).optional(),
   accentColor: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   voiceId: z.string().min(1),
-  refSheetUrls: z.array(z.string().url()).default([]),
+  refSheetUrls: z.array(z.string().min(1)).default([]),
   stats: z.record(z.string(), z.number().int()).default({}),
   inventory: z.array(z.string()).default([]),
 });
@@ -245,16 +245,34 @@ export const RenderJobStatusSchema = z.enum([
   "failed",
 ]);
 
+export const ShotRenderStateSchema = z.object({
+  shotId: z.string().min(1),
+  status: z.enum(["queued", "rendering_v2v", "done", "failed"]),
+  providerJobId: z.string().optional(),
+  videoUrl: z.string().optional(),
+  seed: z.number().int().optional(),
+  rerollCount: z.number().int().min(0).default(0),
+  characterRefUrls: z.array(z.string()).default([]),
+  prompt: z.string().optional(),
+  error: z.string().optional(),
+});
+export type ShotRenderState = z.infer<typeof ShotRenderStateSchema>;
+
 export const RenderJobSchema = z.object({
   jobId: z.string(),
   kind: z.enum(["live_previz", "animatic", "final_film", "reroll_shot"]),
   caseId: z.string(),
   idempotencyKey: z.string(),
+  tariffTier: TariffTierSchema.optional(),
   status: RenderJobStatusSchema,
   progressPct: z.number().min(0).max(100),
   etaSeconds: z.number().int().min(0),
   artifactUrl: z.string().optional(),
   generatedTsxPath: z.string().optional(),
+  shotStates: z.array(ShotRenderStateSchema).optional(),
+  includedRerolls: z.number().int().min(0).optional(),
+  usedFreeRerolls: z.number().int().min(0).optional(),
+  extraRerollCreditsCharged: z.number().int().min(0).optional(),
   error: z.string().optional(),
   createdAt: z.string(),
   updatedAt: z.string(),

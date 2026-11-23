@@ -8,6 +8,7 @@ export interface VideoRenderRequest {
   durationSec: number;
   aspectRatio: "16:9";
   stylePreset: StylePresetId;
+  seed?: number;
 }
 
 export interface VideoJobStatus {
@@ -50,7 +51,10 @@ export class MockVideoProvider implements VideoProvider {
 
   async renderShotV2V(req: VideoRenderRequest): Promise<{ providerJobId: string }> {
     const id = `mock_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    return { providerJobId: `${id}:${encodeURIComponent(req.previzVideoPath)}` };
+    const seedPart = req.seed !== undefined ? `?seed=${req.seed}` : "";
+    return {
+      providerJobId: `${id}:${encodeURIComponent(req.previzVideoPath + seedPart)}`,
+    };
   }
 
   async pollJob(providerJobId: string): Promise<VideoJobStatus> {
@@ -155,3 +159,15 @@ export {
   type RoleLineInput,
   type SynthesizedTurnAudio,
 } from "./audio.js";
+
+export {
+  CloudV2VProvider,
+  EXTRA_REROLL_CREDITS,
+  TARIFF_FREE_REROLLS,
+  createVideoProviderFromEnv,
+  ensureCharacterReferenceSheets,
+  evaluateRerollAllowance,
+  type CloudV2VProviderOptions,
+  type CloudV2VVendor,
+  type RerollAllowanceCheck,
+} from "./v2v.js";

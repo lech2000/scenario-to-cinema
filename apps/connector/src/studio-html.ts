@@ -173,6 +173,45 @@ export function renderStudioHtml(): string {
   }
   .muted { color: var(--muted); font-size: 12px; }
   .status { font-size: 12px; color: var(--amber); min-height: 18px; }
+  .ref-grid {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 8px;
+  }
+  .ref-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px 4px 4px;
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    background: var(--bg);
+    font-size: 11.5px;
+  }
+  .ref-item img {
+    width: 34px;
+    height: 34px;
+    border-radius: 6px;
+    object-fit: cover;
+    border: 1px solid var(--line);
+  }
+  .shot-queue {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+  .shot-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 8px 10px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: var(--bg);
+    font-size: 12px;
+  }
 </style>
 </head>
 <body>
@@ -261,8 +300,9 @@ export function renderStudioHtml(): string {
     </div>
     <div class="preview-box" id="animaticBox">Аниматик ещё не собран</div>
     <div class="card muted" id="estimateCard">Смета появится после сборки аниматика.</div>
-    <button type="button" id="approveBtn" disabled>Утвердить аниматик и запустить V2V (Mock)</button>
+    <button type="button" id="approveBtn" disabled>Утвердить аниматик и запустить пошотовый V2V</button>
     <div class="status" id="filmStatus"></div>
+    <div id="v2vQueueBox" class="card muted" style="display:none"></div>
   </section>
 </main>
 
@@ -281,6 +321,7 @@ async function checkHealth() {
     document.getElementById("healthBadge").textContent =
       (d.raeaAvailable ? "raea GPU: ON" : "raea: TSX-only") +
       " · TTS: " + (d.ttsProvider || "on") +
+      " · V2V: " + (d.videoProvider || "mock") +
       " · LLM: " + (d.llmMode || "fallback");
   } catch {
     document.getElementById("healthBadge").textContent = "Коннектор недоступен";
@@ -320,11 +361,18 @@ document.getElementById("startBtn").onclick = async () => {
     const wb = data.session.worldBible;
     const hero = wb.characters[0];
 
+    const refCards = (wb.characters || []).map((c) => {
+      const refUrl = c.refSheetUrls?.[0];
+      const img = refUrl ? '<img src="' + refUrl + '" alt="' + c.name + '" />' : "";
+      return '<a class="ref-item" href="' + (refUrl || "#") + '" target="_blank" style="color:inherit;text-decoration:none">' +
+        img + '<span><b>' + c.name + '</b><br/><span class="muted">' + c.role + '</span></span></a>';
+    }).join("");
+
     document.getElementById("worldSummary").innerHTML =
       "<b>" + wb.title + "</b> (" + wb.stylePreset + ", " + data.source + ")<br/>" +
       "<small>Локация: " + wb.locations[0].name + " (" + wb.locations[0].lightingPreset + ")</small><br/>" +
-      "<small>Персонажи: " + wb.characters.map(c => c.name).join(", ") + "</small><br/>" +
-      "<small>Инвентарь героя: " + (hero.inventory || []).join(", ") + "</small>";
+      "<small>Инвентарь героя: " + (hero.inventory || []).join(", ") + "</small>" +
+      '<div class="ref-grid">' + refCards + "</div>";
 
     const statSelect = document.getElementById("statSelect");
     statSelect.innerHTML = "";
@@ -467,10 +515,77 @@ document.getElementById("animaticBtn").onclick = async () => {
   }
 };
 
+function renderV2VQueue(job) {
+  const box = document.getElementById("v2vQueueBox");
+  if (!job || !job.shotStates) {
+    box.style.display = "none";
+    return;
+  }
+  box.style.display = "block";
+  const freeLeft = Math.max(0, (job.includedRerolls || 0) - (job.usedFreeRerolls || 0));
+  const extraInfo = job.extraRerollCreditsCharged
+    ? " · Доп. списано: " + job.extraRerollCreditsCharged + " кр."
+    : "";
+  const rows = job.shotStates.map((st) => {
+    const link = st.videoUrl
+      ? ' · <a href="' + st.videoUrl + '" target="_blank" style="color:var(--accent)">клип</a>'
+      : "";
+    return '<div class="shot-row">' +
+      '<div><b>' + st.shotId + '</b> · <span class="muted">' + st.status +
+      " · seed " + (st.seed ?? "—") +
+      " · дублей: " + (st.rerollCount || 0) +
+      " · refs: " + (st.characterRefUrls?.length || 0) + '</span>' + link + "</div>" +
+      '<button type="button" class="ghost small" data-reroll-shot="' + st.shotId + '">↻ Переснять шот</button>' +
+      "</div>";
+  }).join("");
+
+  box.innerHTML =
+    '<div style="margin-bottom:8px"><b>Очередь V2V (' + job.progressPct + '%)</b> · ' +
+    "Бесплатных пересъёмок осталось: <b>" + freeLeft + " из " + (job.includedRerolls || 0) + "</b>" +
+    extraInfo + "</div>" +
+    '<div class="shot-queue">' + rows + "</div>";
+
+  box.querySelectorAll("[data-reroll-shot]").forEach((btn) => {
+    btn.onclick = () => rerollShot(btn.getAttribute("data-reroll-shot"));
+  });
+}
+
+async function rerollShot(shotId, extraPaymentGrantId) {
+  if (!sessionId || !shotId) return;
+  document.getElementById("filmStatus").textContent = "Переснимаем шот " + shotId + " (новый seed)…";
+  try {
+    const payload = { shotId };
+    if (extraPaymentGrantId) payload.extraPaymentGrantId = extraPaymentGrantId;
+    const res = await fetch("/v1/sessions/" + sessionId + "/reroll", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await res.json();
+    if (res.status === 402 && !extraPaymentGrantId) {
+      const ok = confirm(
+        (data.error || "Бесплатные пересъёмки исчерпаны.") +
+        "\\nПодтвердить доп. оплату (" + (data.extraCreditsRequired || 120) + " кр.)?"
+      );
+      if (ok) {
+        return rerollShot(shotId, "grant_extra_local_001");
+      }
+      document.getElementById("filmStatus").textContent = "Пересъёмка отменена.";
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || "Ошибка пересъёмки шота");
+    renderV2VQueue(data.job);
+    document.getElementById("filmStatus").textContent =
+      "Шот " + shotId + " переснят (seed " + data.rerolledShot.seed + ", дубль #" + data.rerolledShot.rerollCount + ").";
+  } catch (err) {
+    document.getElementById("filmStatus").textContent = "Ошибка пересъёмки: " + err.message;
+  }
+}
+
 document.getElementById("approveBtn").onclick = async () => {
   if (!sessionId || !lastAnimaticData) return;
   document.getElementById("approveBtn").disabled = true;
-  document.getElementById("filmStatus").textContent = "Запускаем утверждённый финальный рендер (Mock V2V)…";
+  document.getElementById("filmStatus").textContent = "Запускаем утверждённый пошотовый V2V-рендер…";
   try {
     const res = await fetch("/v1/sessions/" + sessionId + "/approve", {
       method: "POST",
@@ -482,8 +597,9 @@ document.getElementById("approveBtn").onclick = async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Ошибка утверждения");
+    renderV2VQueue(data.job);
     document.getElementById("filmStatus").textContent =
-      "Готово! Job " + data.job.jobId + " · status=" + data.job.status + " · artifact=" + data.job.artifactUrl;
+      "Готово! Job " + data.job.jobId + " · status=" + data.job.status + " · шотов: " + (data.job.shotStates?.length || 1);
   } catch (err) {
     document.getElementById("filmStatus").textContent = "Ошибка: " + err.message;
   } finally {
