@@ -6,6 +6,7 @@ import os from "node:os";
 import { z } from "zod";
 import {
   type DiceRoll,
+  type EpisodeCredits,
   type EpisodeCut,
   type GameEvent,
   type RenderJob,
@@ -16,6 +17,7 @@ import {
   type WorldBible,
   CameraModeSchema,
   DialogueLineSchema,
+  EpisodeCreditsSchema,
   EpisodeCutSchema,
   ShotSpecSchema,
   StylePresetIdSchema,
@@ -53,9 +55,11 @@ import {
   synthesizeTurnAudioTrack,
 } from "@cinema-rpg/providers";
 import {
+  MAX_CASE_ATTACHMENT_BYTES,
   concatMp4Clips,
   findFfmpegBinary,
   findRaeaBinary,
+  materializeV2VShotClip,
   muxVideoWithAudioAndSubs,
   renderCreditsClipMp4,
   renderShotWithRaea,
@@ -155,6 +159,8 @@ interface JobContext {
   shots: ShotSpec[];
   worldBible: WorldBible;
   previzByShotId: Record<string, string>;
+  shotWavByShotId?: Record<string, string>;
+  credits?: EpisodeCredits;
 }
 
 export interface ConnectorOptions {
@@ -346,6 +352,171 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
   const sessions = new Map<string, RuntimeSessionState>();
   const sessionFinalJobId = new Map<string, string>();
 
+  async function masterFinalJobEpisode(ctx: JobContext): Promise<void> {
+    const { job, shots, worldBible } = ctx;
+    const shotStates = job.shotStates ?? [];
+    if (shotStates.length === 0 || !shotStates.every((s) => s.status === "done")) {
+      return;
+    }
+
+    job.status = "mastering";
+    job.updatedAt = new Date().toISOString();
+
+    const clipPaths: string[] = [];
+    const shotSampleChunks: Int16Array[] = [];
+    const shotSubtitleInputs: Array<{ durationSec: number; cues: SubtitleCue[] }> = [];
+    let totalDurationSec = 0;
+
+    for (let i = 0; i < shots.length; i++) {
+      const shot = shots[i];
+      const st = shotStates[i];
+      const durSec = shot.audio?.audioDurationSec ?? shot.durationInFrames / shot.fps;
+      totalDurationSec += durSec;
+
+      const clipOut = path.join(workDir, `${job.jobId}_${shot.id}_r${st.rerollCount}.mp4`);
+      const materialized = await materializeV2VShotClip({
+        videoUrl: st.videoUrl,
+        fallbackPrevizPath: ctx.previzByShotId[shot.id],
+        durationSec: durSec,
+        outPath: clipOut,
+      });
+      if (materialized) {
+        clipPaths.push(materialized);
+      }
+
+      const wavCandidate =
+        shot.audio?.ttsAudioPath ?? ctx.shotWavByShotId?.[shot.id];
+      if (wavCandidate && fs.existsSync(wavCandidate)) {
+        const decoded = decodeMonoWavSamples(fs.readFileSync(wavCandidate));
+        shotSampleChunks.push(decoded.samples);
+      } else {
+        // Synthesize calm ambient bed so mastered MP4 always carries valid AAC audio
+        shotSampleChunks.push(synthesizeOutroChord(durSec, AUDIO_SAMPLE_RATE));
+      }
+
+      const existingCues = shot.audio?.subtitles;
+      const fallbackText = shot.audio?.dialogueLine?.text ?? shot.v2vPrompt;
+      const fallbackSpeakerId =
+        shot.audio?.dialogueLine?.speakerId ?? shot.actors[0]?.characterId ?? "narrator";
+      const fallbackSpeakerName =
+        worldBible.characters.find((c) => c.id === fallbackSpeakerId)?.name ?? "Рассказчик";
+
+      shotSubtitleInputs.push({
+        durationSec: durSec,
+        cues:
+          existingCues && existingCues.length > 0
+            ? existingCues
+            : [
+                {
+                  index: 1,
+                  startSec: 0.1,
+                  endSec: Number(Math.max(0.8, durSec - 0.15).toFixed(3)),
+                  speakerId: fallbackSpeakerId,
+                  speakerName: fallbackSpeakerName,
+                  text: fallbackText,
+                },
+              ],
+      });
+    }
+
+    const credits: EpisodeCredits =
+      ctx.credits ??
+      EpisodeCreditsSchema.parse({
+        enabled: true,
+        episodeTitle: worldBible.title,
+        subtitle: "Финальный эпизод · Книга в кино",
+        starring: worldBible.characters.map((c) => c.name),
+        directedBy: "Игрок и AI Showrunner · ФиксАР",
+        footerNote: "cinema-rpg/book-to-film-rpg",
+        durationSec: 4,
+      });
+
+    let creditsIncluded = false;
+    if (credits.enabled !== false) {
+      const creditsSec = credits.durationSec ?? 4;
+      totalDurationSec += creditsSec;
+      const castLine =
+        credits.starring.length > 0
+          ? ` · В ролях: ${credits.starring.slice(0, 3).join(", ")}`
+          : "";
+      shotSubtitleInputs.push({
+        durationSec: creditsSec,
+        cues: [
+          {
+            index: 1,
+            startSec: 0.2,
+            endSec: Number(Math.max(1.2, creditsSec - 0.2).toFixed(3)),
+            speakerId: "credits",
+            speakerName: "ТИТРЫ",
+            text: `«${credits.episodeTitle}»${castLine} · Режиссёр: ${credits.directedBy}`,
+          },
+        ],
+      });
+      shotSampleChunks.push(synthesizeOutroChord(creditsSec, AUDIO_SAMPLE_RATE));
+
+      if (clipPaths.length > 0) {
+        const creditsMp4 = path.join(workDir, `${job.jobId}_credits.mp4`);
+        const credRender = await renderCreditsClipMp4({
+          credits,
+          outPath: creditsMp4,
+          matchVideoPath: clipPaths[0],
+        });
+        if (credRender.ok) {
+          clipPaths.push(creditsMp4);
+          creditsIncluded = true;
+        }
+      } else {
+        creditsIncluded = true;
+      }
+    }
+
+    const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
+    const srtFile = `${job.jobId}_final.srt`;
+    const vttFile = `${job.jobId}_final.vtt`;
+    const wavFile = `${job.jobId}_final.wav`;
+    const mp4File = `${job.jobId}_final.mp4`;
+    const srtPath = path.join(workDir, srtFile);
+    const vttPath = path.join(workDir, vttFile);
+    const wavPath = path.join(workDir, wavFile);
+    const mp4Path = path.join(workDir, mp4File);
+
+    fs.writeFileSync(srtPath, formatSubtitlesSrt(mergedCues), "utf-8");
+    fs.writeFileSync(vttPath, formatSubtitlesWebVtt(mergedCues), "utf-8");
+
+    const totalSamples = shotSampleChunks.reduce((acc, s) => acc + s.length, 0);
+    const masterSamples = new Int16Array(totalSamples);
+    let offset = 0;
+    for (const chunk of shotSampleChunks) {
+      masterSamples.set(chunk, offset);
+      offset += chunk.length;
+    }
+    fs.writeFileSync(wavPath, encodeMonoWav(masterSamples, AUDIO_SAMPLE_RATE));
+
+    job.masteredSrtUrl = `/media/${srtFile}`;
+    job.masteredVttUrl = `/media/${vttFile}`;
+    job.creditsIncluded = creditsIncluded;
+
+    if (clipPaths.length > 0) {
+      const concat = await concatMp4Clips({
+        mp4Paths: clipPaths,
+        episodeWavPath: wavPath,
+        episodeSrtPath: srtPath,
+        totalDurationSec,
+        outPath: mp4Path,
+      });
+      if (concat.ok && concat.bytes !== undefined) {
+        if (concat.bytes > MAX_CASE_ATTACHMENT_BYTES) {
+          throw new Error(
+            `Mastered MP4 (${concat.bytes} bytes) exceeds FixAR 32 MB attachment cap`
+          );
+        }
+        job.masteredMp4Url = `/media/${mp4File}`;
+        job.masteredBytes = concat.bytes;
+        job.artifactUrl = job.masteredMp4Url;
+      }
+    }
+  }
+
   async function runPerShotV2VQueue(params: {
     jobId: string;
     caseId: string;
@@ -354,6 +525,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
     shots: ShotSpec[];
     worldBible: WorldBible;
     previzByShotId: Record<string, string>;
+    shotWavByShotId?: Record<string, string>;
+    credits?: EpisodeCredits;
   }): Promise<JobContext> {
     const includedRerolls = TARIFF_FREE_REROLLS[params.tariffTier];
     const shotStates: ShotRenderState[] = params.shots.map((s, idx) => ({
@@ -388,6 +561,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
       shots: params.shots,
       worldBible: params.worldBible,
       previzByShotId: params.previzByShotId,
+      shotWavByShotId: params.shotWavByShotId,
+      credits: params.credits,
     };
     jobs.set(params.jobId, ctx);
 
@@ -429,9 +604,15 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
 
     const allDone = shotStates.every((s) => s.status === "done");
     const anyFailed = shotStates.some((s) => s.status === "failed");
-    job.status = allDone ? "done" : anyFailed ? "failed" : "rendering_v2v";
-    job.etaSeconds = allDone ? 0 : 90;
     job.artifactUrl = shotStates[shotStates.length - 1]?.videoUrl;
+    if (allDone) {
+      await masterFinalJobEpisode(ctx);
+      job.status = "done";
+      job.etaSeconds = 0;
+    } else {
+      job.status = anyFailed ? "failed" : "rendering_v2v";
+      job.etaSeconds = 90;
+    }
     job.updatedAt = new Date().toISOString();
     return ctx;
   }
@@ -503,8 +684,13 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
 
     const doneCount = job.shotStates!.filter((s) => s.status === "done").length;
     job.progressPct = Math.round((doneCount / job.shotStates!.length) * 100);
-    job.status = doneCount === job.shotStates!.length ? "done" : "rendering_v2v";
     job.artifactUrl = st.videoUrl ?? job.artifactUrl;
+    if (doneCount === job.shotStates!.length) {
+      await masterFinalJobEpisode(ctx);
+      job.status = "done";
+    } else {
+      job.status = "rendering_v2v";
+    }
     job.updatedAt = new Date().toISOString();
 
     return {
@@ -1180,11 +1366,15 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
         const jobId = `job_${crypto.randomBytes(8).toString("hex")}`;
         const previzByShotId: Record<string, string> = {};
+        const shotWavByShotId: Record<string, string> = {};
         for (const s of activeShots) {
           const media = session.shotMedia[s.id];
           previzByShotId[s.id] = media?.mp4Url
             ? path.join(workDir, path.basename(media.mp4Url))
             : media?.tsxPath ?? `${session.sessionId}_${s.id}.mp4`;
+          if (media?.wavPath) {
+            shotWavByShotId[s.id] = media.wavPath;
+          }
         }
 
         const ctx = await runPerShotV2VQueue({
@@ -1195,6 +1385,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           shots: activeShots,
           worldBible: session.worldBible,
           previzByShotId,
+          shotWavByShotId,
+          credits: session.episodeCut?.credits,
         });
         sessionFinalJobId.set(session.sessionId, jobId);
         return sendJson(res, 202, { ok: true, job: ctx.job });
@@ -1328,6 +1520,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           shots: parsed.episodeCut.shots,
           worldBible: parsed.worldBible,
           previzByShotId,
+          credits: parsed.episodeCut.credits,
         });
         ctx.job.generatedTsxPath = previzByShotId[parsed.episodeCut.shots[0].id];
         idempotencyIndex.set(parsed.idempotencyKey, jobId);

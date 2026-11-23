@@ -12,7 +12,8 @@
     "test": "npm run test --workspaces --if-present",
     "spike:compile": "npm --workspace=@cinema-rpg/raea-dsl run spike:compile",
     "connector:dev": "npm --workspace=@cinema-rpg/connector run dev",
-    "pack:bundle": "bash fixar-pack/scripts/package-pack.sh"
+    "pack:bundle": "bash fixar-pack/scripts/package-pack.sh",
+    "pack:validate": "bash fixar-pack/scripts/validate-registry.sh"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
