@@ -11,9 +11,9 @@
   - `scripts/package-pack.sh` — сборка `.tar.gz` + SHA-256 для GitHub Release и `/pak/kabinet/`.
 - `packages/shared/` — единые Zod/TypeScript-контракты (`WorldBible`, `GameEvent`, `ShotSpec`, `EpisodeCut`, `CostEstimate`, `RenderJob`).
 - `packages/engine/` — World Builder (разбор главы книги 1–20 стр.), ИИ-Мастер с механикой `2d6`, генератор `ShotSpec` и клиент OpenAI-совместимых LLM (с офлайн-фолбэком для запуска без ключей).
-- `packages/raea-dsl/` — детерминированный компилятор `ShotSpec + WorldBible → raea TSX` и спайк Фазы 0 (`src/spike-tavern-duel.ts`).
-- `packages/providers/` — абстракции `VideoProvider` (`MockVideoProvider` + заготовка `CloudV2VProviderSkeleton`), `AudioProvider`, `BillingAdapter` и калькулятор сметы в кредитах ФиксАР.
-- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор (`raea` CLI рендер кадров/MP4 на GPU, склейка аниматика через FFmpeg, смета ФиксАР, проверка утверждения аниматика, `payment_grant_id` и идемпотентности).
+- `packages/raea-dsl/` — детерминированный компилятор `ShotSpec + WorldBible → raea TSX` (14-сегментные шарнирные фигуры персонажей, нативный `<Character>`, пресеты `<Look mode="paint" | "cartoon">` и спайк `src/spike-tavern-duel.ts`).
+- `packages/providers/` — Audio-First синтез речи по ролям (`MultiTierRoleAudioProvider`: OpenAI TTS / локальный macOS `say -v Milena` с тембровым разделением ролей / кроссплатформенный WAV-фолбэк), авто-тайминг кадров через `ffprobe`, генератор `.srt`/`.vtt` субтитров, SFX + ducking эмбиента, а также `VideoProvider`, `BillingAdapter` и смета ФиксАР.
+- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор (`Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → `ffmpeg` микширование AAC + `mov_text` субтитров, смета ФиксАР, проверка утверждения аниматика, `payment_grant_id` и идемпотентности).
 - `CODER_SETUP.md` — пошаговая настройка дела `case_f6db507d967c49d9` и внешнего кодера площадки через MCP.
 
 ## Быстрый старт

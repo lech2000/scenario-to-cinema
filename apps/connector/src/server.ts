@@ -6,7 +6,11 @@ import os from "node:os";
 import { z } from "zod";
 import {
   type DiceRoll,
+  type GameEvent,
   type RenderJob,
+  type ShotSpec,
+  type SubtitleCue,
+  type WorldBible,
   EpisodeCutSchema,
   ShotSpecSchema,
   StylePresetIdSchema,
@@ -23,16 +27,27 @@ import {
 } from "@cinema-rpg/engine";
 import { compileShotToRaeaTsx } from "@cinema-rpg/raea-dsl";
 import {
+  AUDIO_SAMPLE_RATE,
+  type AudioProvider,
   type BillingAdapter,
+  type RoleLineInput,
   type VideoProvider,
   ExternalGrantBillingAdapter,
   MockVideoProvider,
+  MultiTierRoleAudioProvider,
+  decodeMonoWavSamples,
+  encodeMonoWav,
   estimateEpisodeCost,
+  formatSubtitlesSrt,
+  formatSubtitlesWebVtt,
+  mergeEpisodeSubtitles,
+  synthesizeTurnAudioTrack,
 } from "@cinema-rpg/providers";
 import {
   concatMp4Clips,
   findFfmpegBinary,
   findRaeaBinary,
+  muxVideoWithAudioAndSubs,
   renderShotWithRaea,
 } from "./raea-runner.js";
 import { renderStudioHtml } from "./studio-html.js";
@@ -91,6 +106,7 @@ const ApproveSessionRequestSchema = z.object({
 export interface ConnectorOptions {
   apiKey?: string;
   videoProvider?: VideoProvider;
+  audioProvider?: AudioProvider;
   billingAdapter?: BillingAdapter;
   llmClient?: StructuredLLMClient;
   workDir?: string;
@@ -103,6 +119,37 @@ export function roll2d6(stat: string, modifier: number): DiceRoll {
   const total = d1 + d2 + modifier;
   const outcome = total <= 6 ? "fail" : total <= 9 ? "partial" : "success";
   return { stat, dice: [d1, d2], modifier, total, outcome };
+}
+
+function buildRoleLinesForTurn(event: GameEvent, wb: WorldBible): RoleLineInput[] {
+  const lines: RoleLineInput[] = [];
+
+  // Extract concise narrator beat (before direct quote if present)
+  const narratorBeat = event.narrativeText.split("«")[0]?.trim();
+  if (narratorBeat) {
+    lines.push({
+      speakerId: "narrator",
+      speakerName: "Рассказчик",
+      role: "narrator",
+      voiceId: "voice_ru_narrator",
+      text: narratorBeat.replace(/:\s*$/, "."),
+      emotion: "neutral",
+    });
+  }
+
+  for (const dlg of event.dialogues) {
+    const profile = wb.characters.find((c) => c.id === dlg.speakerId);
+    lines.push({
+      speakerId: dlg.speakerId,
+      speakerName: profile?.name ?? (dlg.speakerId === "narrator" ? "Рассказчик" : dlg.speakerId),
+      role: profile?.role ?? "narrator",
+      voiceId: profile?.voiceId ?? "voice_ru_narrator",
+      text: dlg.text,
+      emotion: dlg.emotion,
+    });
+  }
+
+  return lines;
 }
 
 function sendJson(res: http.ServerResponse, status: number, body: unknown): void {
@@ -129,10 +176,16 @@ function serveMediaFile(
       ? "video/mp4"
       : ext === ".png"
         ? "image/png"
-        : "application/octet-stream";
+        : ext === ".wav"
+          ? "audio/wav"
+          : ext === ".vtt"
+            ? "text/vtt; charset=utf-8"
+            : ext === ".srt"
+              ? "text/plain; charset=utf-8"
+              : "application/octet-stream";
 
   const range = req.headers.range;
-  if (range && ext === ".mp4") {
+  if (range && (ext === ".mp4" || ext === ".wav")) {
     const match = range.match(/bytes=(\d+)-(\d*)/);
     if (match) {
       const start = Number(match[1]);
@@ -175,12 +228,15 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
 }
 
 export function createConnectorServer(opts: ConnectorOptions = {}): http.Server {
+  const workDir = opts.workDir ?? path.join(os.tmpdir(), "cinema-rpg-connector");
+  fs.mkdirSync(workDir, { recursive: true });
+
   const videoProvider = opts.videoProvider ?? new MockVideoProvider();
+  const audioProvider =
+    opts.audioProvider ?? new MultiTierRoleAudioProvider({ workDir });
   const billing = opts.billingAdapter ?? new ExternalGrantBillingAdapter();
   const llmClient = opts.llmClient ?? new OpenAICompatibleLLMClient();
   const enableLiveRaea = opts.enableLiveRaea ?? true;
-  const workDir = opts.workDir ?? path.join(os.tmpdir(), "cinema-rpg-connector");
-  fs.mkdirSync(workDir, { recursive: true });
 
   const jobs = new Map<string, RenderJob>();
   const idempotencyIndex = new Map<string, string>();
@@ -203,6 +259,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           ok: true,
           service: "cinema-engine-connector",
           videoProvider: videoProvider.name,
+          ttsProvider: audioProvider.name,
           billingMode: billing.mode,
           llmMode: llmClient.mode,
           raeaAvailable: enableLiveRaea && Boolean(findRaeaBinary()),
@@ -211,7 +268,9 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         });
       }
 
-      const mediaMatch = url.pathname.match(/^\/media\/([a-zA-Z0-9_.-]+\.(?:png|mp4))$/);
+      const mediaMatch = url.pathname.match(
+        /^\/media\/([a-zA-Z0-9_.-]+\.(?:png|mp4|wav|srt|vtt))$/
+      );
       if (method === "GET" && mediaMatch) {
         const safeName = path.basename(mediaMatch[1]);
         return serveMediaFile(req, res, path.join(workDir, safeName));
@@ -224,7 +283,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
       }
 
-      // ── Interactive Prototype Sessions (Book -> WorldBible -> 2d6 -> raea) ──
+      // ── Interactive Prototype Sessions (Book -> WorldBible -> Audio-First 2d6 -> raea) ──
       if (method === "POST" && url.pathname === "/v1/sessions") {
         const parsed = CreateSessionRequestSchema.parse(await readJsonBody(req));
         const { worldBible, source } = await ingestScenarioText({
@@ -263,15 +322,41 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           llm: llmClient,
         });
 
+        const baseName = `${session.sessionId}_${turn.shot.id}`.replace(
+          /[^a-zA-Z0-9_-]/g,
+          "_"
+        );
+
+        // 1. AUDIO-FIRST: synthesize multi-role dialogue + SFX + subtitles BEFORE 3D render
+        const roleLines = buildRoleLinesForTurn(turn.event, session.worldBible);
+        const audioTrack = await synthesizeTurnAudioTrack({
+          outDir: workDir,
+          baseName,
+          lines: roleLines,
+          sfxTags: turn.shot.audio?.sfxTags ?? [],
+          fps: turn.shot.fps,
+          provider: audioProvider,
+        });
+
+        // 2. FRAME LOCK: lock raea ShotSpec durationInFrames to measured audio length
+        turn.shot.durationInFrames = audioTrack.durationInFrames;
+        turn.shot.audio = {
+          ...(turn.shot.audio ?? { sfxTags: [] }),
+          ttsAudioPath: audioTrack.wavPath,
+          audioDurationSec: audioTrack.durationSec,
+          subtitles: audioTrack.cues,
+        };
+
+        // 3. Compile frame-locked ShotSpec -> raea TSX & render 3D clip
         const tsx = compileShotToRaeaTsx(turn.shot, session.worldBible);
-        const tsxPath = path.join(workDir, `${session.sessionId}_${turn.shot.id}.tsx`);
+        const tsxPath = path.join(workDir, `${baseName}.tsx`);
         fs.writeFileSync(tsxPath, tsx, "utf-8");
 
         const render = enableLiveRaea
           ? await renderShotWithRaea({
               tsxPath,
               outDir: workDir,
-              shotId: `${session.sessionId}_${turn.shot.id}`,
+              shotId: baseName,
               keyframe: Math.floor(turn.shot.durationInFrames / 2),
               renderMp4: parsed.renderMp4,
             })
@@ -281,10 +366,28 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
               note: "Live raea rendering disabled for this server instance.",
             };
 
+        // 4. Mux multi-role audio + soft Russian subtitles into the rendered MP4
+        if (render.mp4File) {
+          await muxVideoWithAudioAndSubs({
+            mp4Path: path.join(workDir, render.mp4File),
+            wavPath: audioTrack.wavPath,
+            srtPath: audioTrack.srtPath,
+          });
+        }
+
+        const wavName = path.basename(audioTrack.wavPath);
+        const srtName = path.basename(audioTrack.srtPath);
+        const vttName = path.basename(audioTrack.vttPath);
+
         const media = {
           tsxPath,
           pngUrl: render.pngFile ? `/media/${render.pngFile}` : undefined,
           mp4Url: render.mp4File ? `/media/${render.mp4File}` : undefined,
+          wavUrl: `/media/${wavName}`,
+          srtUrl: `/media/${srtName}`,
+          vttUrl: `/media/${vttName}`,
+          wavPath: audioTrack.wavPath,
+          durationSec: audioTrack.durationSec,
         };
         session.shotMedia[turn.shot.id] = media;
 
@@ -294,6 +397,12 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           shot: turn.shot,
           suggestedChoices: turn.suggestedChoices,
           source: turn.source,
+          audio: {
+            provider: audioTrack.providerName,
+            durationSec: audioTrack.durationSec,
+            durationInFrames: audioTrack.durationInFrames,
+            cues: audioTrack.cues,
+          },
           render,
           media,
         });
@@ -311,16 +420,36 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
         const parsed = AnimaticRequestSchema.parse(await readJsonBody(req));
         const mp4Paths: string[] = [];
+        const shotSampleChunks: Int16Array[] = [];
+        const shotSubtitleInputs: Array<{ durationSec: number; cues: SubtitleCue[] }> = [];
 
         for (const shot of session.shots) {
+          const baseName = `${session.sessionId}_${shot.id}`.replace(
+            /[^a-zA-Z0-9_-]/g,
+            "_"
+          );
           const existing = session.shotMedia[shot.id];
-          const expectedMp4 = path.join(workDir, `${session.sessionId}_${shot.id}.mp4`);
+          const wavPath = existing?.wavPath ?? path.join(workDir, `${baseName}.wav`);
+          if (fs.existsSync(wavPath)) {
+            const decoded = decodeMonoWavSamples(fs.readFileSync(wavPath));
+            shotSampleChunks.push(decoded.samples);
+            shotSubtitleInputs.push({
+              durationSec: decoded.samples.length / decoded.sampleRate,
+              cues: shot.audio?.subtitles ?? [],
+            });
+          } else {
+            shotSubtitleInputs.push({
+              durationSec: shot.durationInFrames / shot.fps,
+              cues: shot.audio?.subtitles ?? [],
+            });
+          }
+
+          const expectedMp4 = path.join(workDir, `${baseName}.mp4`);
           if (fs.existsSync(expectedMp4)) {
             mp4Paths.push(expectedMp4);
             continue;
           }
-          const tsxPath =
-            existing?.tsxPath ?? path.join(workDir, `${session.sessionId}_${shot.id}.tsx`);
+          const tsxPath = existing?.tsxPath ?? path.join(workDir, `${baseName}.tsx`);
           if (!fs.existsSync(tsxPath)) {
             fs.writeFileSync(tsxPath, compileShotToRaeaTsx(shot, session.worldBible), "utf-8");
           }
@@ -328,7 +457,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
             const resRender = await renderShotWithRaea({
               tsxPath,
               outDir: workDir,
-              shotId: `${session.sessionId}_${shot.id}`,
+              shotId: baseName,
               renderMp4: true,
             });
             if (resRender.mp4File) {
@@ -343,15 +472,45 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           }
         }
 
-        const outFile = `${session.sessionId}_animatic.mp4`;
+        // Build Episode-wide master WAV + merged SRT & WebVTT subtitles
+        const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
+        const epBase = `${session.sessionId}_animatic`;
+        const epSrtFile = `${epBase}.srt`;
+        const epVttFile = `${epBase}.vtt`;
+        const epSrtPath = path.join(workDir, epSrtFile);
+        const epVttPath = path.join(workDir, epVttFile);
+        fs.writeFileSync(epSrtPath, formatSubtitlesSrt(mergedCues), "utf-8");
+        fs.writeFileSync(epVttPath, formatSubtitlesWebVtt(mergedCues), "utf-8");
+
+        let epWavPath: string | undefined;
+        let epWavFile: string | undefined;
+        if (shotSampleChunks.length > 0) {
+          const totalLen = shotSampleChunks.reduce((acc, s) => acc + s.length, 0);
+          const masterSamples = new Int16Array(totalLen);
+          let offset = 0;
+          for (const chunk of shotSampleChunks) {
+            masterSamples.set(chunk, offset);
+            offset += chunk.length;
+          }
+          epWavFile = `${epBase}.wav`;
+          epWavPath = path.join(workDir, epWavFile);
+          fs.writeFileSync(epWavPath, encodeMonoWav(masterSamples, AUDIO_SAMPLE_RATE));
+        }
+
+        const outFile = `${epBase}.mp4`;
         const outPath = path.join(workDir, outFile);
-        const concat = await concatMp4Clips({ mp4Paths, outPath });
+        const concat = await concatMp4Clips({
+          mp4Paths,
+          episodeWavPath: epWavPath,
+          episodeSrtPath: epSrtPath,
+          outPath,
+        });
         if (concat.ok) {
           session.animaticUrl = `/media/${outFile}`;
         }
 
         const totalDurationSec = session.shots.reduce(
-          (sum, s) => sum + s.durationInFrames / s.fps,
+          (sum, s) => sum + (s.audio?.audioDurationSec ?? s.durationInFrames / s.fps),
           0
         );
         const estimate = estimateEpisodeCost({
@@ -364,6 +523,10 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         return sendJson(res, 200, {
           ok: true,
           animaticUrl: concat.ok ? `/media/${outFile}` : undefined,
+          audioUrl: epWavFile ? `/media/${epWavFile}` : undefined,
+          srtUrl: `/media/${epSrtFile}`,
+          vttUrl: `/media/${epVttFile}`,
+          subtitles: mergedCues,
           bytes: concat.bytes,
           concatNote: concat.note,
           estimate,
@@ -390,7 +553,7 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
 
         session.animaticApproved = true;
-        const firstShot = session.shots[0];
+        const firstShot: ShotSpec = session.shots[0];
         const previzPath =
           session.animaticUrl ??
           session.shotMedia[firstShot.id]?.mp4Url ??

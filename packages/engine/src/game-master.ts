@@ -18,7 +18,19 @@ export interface RuntimeSessionState {
   actorZones: Record<string, string>;
   events: GameEvent[];
   shots: ShotSpec[];
-  shotMedia: Record<string, { pngUrl?: string; mp4Url?: string; tsxPath?: string }>;
+  shotMedia: Record<
+    string,
+    {
+      pngUrl?: string;
+      mp4Url?: string;
+      wavUrl?: string;
+      vttUrl?: string;
+      srtUrl?: string;
+      wavPath?: string;
+      durationSec?: number;
+      tsxPath?: string;
+    }
+  >;
   animaticUrl?: string;
   animaticApproved: boolean;
 }

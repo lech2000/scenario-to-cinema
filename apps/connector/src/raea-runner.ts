@@ -88,8 +88,59 @@ export async function renderShotWithRaea(params: {
   };
 }
 
+/**
+ * Muxes a silent `raea` MP4 clip with a synthesized multi-voice WAV track and
+ * optional SRT soft subtitle stream (`mov_text`) in place.
+ */
+export async function muxVideoWithAudioAndSubs(params: {
+  mp4Path: string;
+  wavPath: string;
+  srtPath?: string;
+}): Promise<boolean> {
+  const ffmpegBin = findFfmpegBinary();
+  if (!ffmpegBin || !fs.existsSync(params.mp4Path) || !fs.existsSync(params.wavPath)) {
+    return false;
+  }
+
+  const tmpOut = `${params.mp4Path}.muxed.mp4`;
+  const hasSrt = Boolean(params.srtPath && fs.existsSync(params.srtPath));
+
+  const args = [
+    "-y",
+    "-i",
+    params.mp4Path,
+    "-i",
+    params.wavPath,
+    ...(hasSrt ? ["-i", params.srtPath!] : []),
+    "-map",
+    "0:v:0",
+    "-map",
+    "1:a:0",
+    ...(hasSrt ? ["-map", "2:0"] : []),
+    "-c:v",
+    "copy",
+    "-c:a",
+    "aac",
+    "-b:a",
+    "128k",
+    "-ac",
+    "2",
+    ...(hasSrt ? ["-c:s", "mov_text", "-metadata:s:s:0", "language=rus"] : []),
+    "-shortest",
+    "-movflags",
+    "+faststart",
+    tmpOut,
+  ];
+
+  await execFileAsync(ffmpegBin, args, { timeout: 60_000 });
+  fs.renameSync(tmpOut, params.mp4Path);
+  return true;
+}
+
 export async function concatMp4Clips(params: {
   mp4Paths: string[];
+  episodeWavPath?: string;
+  episodeSrtPath?: string;
   outPath: string;
 }): Promise<{ ok: boolean; bytes?: number; note?: string }> {
   const ffmpegBin = findFfmpegBinary();
@@ -97,7 +148,10 @@ export async function concatMp4Clips(params: {
     return { ok: false, note: "ffmpeg недоступен или нет MP4-клипов для склейки." };
   }
 
-  if (params.mp4Paths.length === 1) {
+  const hasAudio = Boolean(params.episodeWavPath && fs.existsSync(params.episodeWavPath));
+  const hasSrt = Boolean(params.episodeSrtPath && fs.existsSync(params.episodeSrtPath));
+
+  if (params.mp4Paths.length === 1 && !hasAudio && !hasSrt) {
     fs.copyFileSync(params.mp4Paths[0], params.outPath);
     return { ok: true, bytes: fs.statSync(params.outPath).size };
   }
@@ -109,33 +163,39 @@ export async function concatMp4Clips(params: {
   fs.writeFileSync(listPath, listBody, "utf-8");
 
   try {
-    // Re-encode at ~1.8 Mbps H.264 to stay comfortably under FixAR's 32 MB attachment cap
-    await execFileAsync(
-      ffmpegBin,
-      [
-        "-y",
-        "-f",
-        "concat",
-        "-safe",
-        "0",
-        "-i",
-        listPath,
-        "-c:v",
-        "libx264",
-        "-b:v",
-        "1800k",
-        "-maxrate",
-        "2000k",
-        "-bufsize",
-        "3600k",
-        "-pix_fmt",
-        "yuv420p",
-        "-movflags",
-        "+faststart",
-        params.outPath,
-      ],
-      { timeout: 120_000 }
-    );
+    // Re-encode video at ~1.8 Mbps H.264 + AAC 128k + mov_text subs (stays under FixAR's 32 MB cap)
+    const args: string[] = [
+      "-y",
+      "-f",
+      "concat",
+      "-safe",
+      "0",
+      "-i",
+      listPath,
+      ...(hasAudio ? ["-i", params.episodeWavPath!] : []),
+      ...(hasSrt ? ["-i", params.episodeSrtPath!] : []),
+      "-map",
+      "0:v:0",
+      ...(hasAudio ? ["-map", "1:a:0"] : []),
+      ...(hasSrt ? ["-map", hasAudio ? "2:0" : "1:0"] : []),
+      "-c:v",
+      "libx264",
+      "-b:v",
+      "1800k",
+      "-maxrate",
+      "2000k",
+      "-bufsize",
+      "3600k",
+      "-pix_fmt",
+      "yuv420p",
+      ...(hasAudio ? ["-c:a", "aac", "-b:a", "128k", "-ac", "2"] : ["-an"]),
+      ...(hasSrt ? ["-c:s", "mov_text", "-metadata:s:s:0", "language=rus"] : []),
+      "-movflags",
+      "+faststart",
+      params.outPath,
+    ];
+
+    await execFileAsync(ffmpegBin, args, { timeout: 120_000 });
     return { ok: true, bytes: fs.statSync(params.outPath).size };
   } finally {
     if (fs.existsSync(listPath)) fs.unlinkSync(listPath);
