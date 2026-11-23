@@ -30,8 +30,9 @@ function detectLighting(text: string): WorldBible["locations"][number]["lighting
 function extractCandidateNames(text: string): string[] {
   const matches = text.match(/(?:^|[\s«"(])([А-ЯЁ][а-яё]{2,14}|[A-Z][a-z]{2,14})/gm) ?? [];
   const stop = new Set([
-    "Глава", "Сцена", "Таверна", "Лес", "Город", "Ночь", "Утро", "Вечер",
-    "Когда", "Потом", "Вдруг", "Здесь", "Там", "Она", "Они", "Его", "Это",
+    "Глава", "Сцена", "Таверна", "Лес", "Леса", "Город", "Ночь", "Утро", "Вечер",
+    "Когда", "Потом", "Вдруг", "Здесь", "Там", "Она", "Они", "Его", "Это", "На", "Под", "У", "В",
+    "Проклятие", "Серебряного", "Следопыт", "Наёмник", "Старый", "Ворон", "Деревня",
     "Chapter", "Scene", "The", "And", "But", "When", "Then", "Night",
   ]);
   const counts = new Map<string, number>();

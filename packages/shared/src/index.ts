@@ -175,10 +175,20 @@ export const ShotActorActionSchema = z.object({
   lookAtTargetId: z.string().min(1).optional(),
 });
 
+export const SubtitleCueSchema = z.object({
+  index: z.number().int().min(1),
+  startSec: z.number().min(0),
+  endSec: z.number().positive(),
+  speakerId: z.string().min(1),
+  speakerName: z.string().min(1),
+  text: z.string().min(1),
+});
+export type SubtitleCue = z.infer<typeof SubtitleCueSchema>;
+
 export const ShotSpecSchema = z.object({
   id: z.string().regex(/^[a-zA-Z0-9_-]+$/),
   locationId: z.string().min(1),
-  durationInFrames: z.number().int().min(12).max(900),
+  durationInFrames: z.number().int().min(12).max(1800),
   fps: z.union([z.literal(24), z.literal(30)]).default(24),
   camera: z.object({
     mode: CameraModeSchema,
@@ -192,6 +202,8 @@ export const ShotSpecSchema = z.object({
     .object({
       dialogueLine: DialogueLineSchema.optional(),
       ttsAudioPath: z.string().optional(),
+      audioDurationSec: z.number().positive().optional(),
+      subtitles: z.array(SubtitleCueSchema).optional(),
       sfxTags: z
         .array(z.object({ tag: z.string(), atFrame: z.number().int().min(0) }))
         .default([]),

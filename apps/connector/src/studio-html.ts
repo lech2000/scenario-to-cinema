@@ -279,7 +279,9 @@ async function checkHealth() {
     const r = await fetch("/health");
     const d = await r.json();
     document.getElementById("healthBadge").textContent =
-      (d.raeaAvailable ? "raea GPU: ON" : "raea: TSX-only") + " · LLM: " + (d.llmMode || "fallback");
+      (d.raeaAvailable ? "raea GPU: ON" : "raea: TSX-only") +
+      " · TTS: " + (d.ttsProvider || "on") +
+      " · LLM: " + (d.llmMode || "fallback");
   } catch {
     document.getElementById("healthBadge").textContent = "Коннектор недоступен";
   }
@@ -394,14 +396,19 @@ async function submitTurn(text) {
 
     const pBox = document.getElementById("previzBox");
     if (data.media?.mp4Url) {
-      pBox.innerHTML = '<video controls autoplay loop muted playsinline src="' + data.media.mp4Url + '"></video>';
+      const trackTag = data.media.vttUrl
+        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + data.media.vttUrl + '" default />'
+        : "";
+      pBox.innerHTML = '<video controls autoplay playsinline src="' + data.media.mp4Url + '">' + trackTag + '</video>';
     } else if (data.media?.pngUrl) {
       pBox.innerHTML = '<img src="' + data.media.pngUrl + '" alt="3D Previz" />';
     } else {
       pBox.textContent = "TSX скомпилирован (локальный raea отключён)";
     }
-    document.getElementById("previzMeta").textContent =
-      "Шот " + data.shot.id + " · камера: " + data.shot.camera.mode + " · рендер: " + data.render.durationMs + " мс";
+    const audioSec = data.shot.audio?.audioDurationSec ? data.shot.audio.audioDurationSec + " сек TTS · " : "";
+    const srtLink = data.media?.srtUrl ? ' · <a href="' + data.media.srtUrl + '" download style="color:var(--accent)">SRT</a>' : "";
+    document.getElementById("previzMeta").innerHTML =
+      "Шот " + data.shot.id + " · " + audioSec + data.shot.durationInFrames + " кадров · камера: " + data.shot.camera.mode + " · рендер: " + data.render.durationMs + " мс" + srtLink;
     document.getElementById("shotJson").textContent = JSON.stringify(data.shot, null, 2);
     document.getElementById("turnStatus").textContent = "Ход #" + ev.turnIndex + " записан в 3D-сцену.";
   } catch (err) {
@@ -435,16 +442,22 @@ document.getElementById("animaticBtn").onclick = async () => {
     lastAnimaticData = data;
     const aBox = document.getElementById("animaticBox");
     if (data.animaticUrl) {
-      aBox.innerHTML = '<video controls autoplay playsinline src="' + data.animaticUrl + '"></video>';
+      const aTrack = data.vttUrl
+        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + data.vttUrl + '" default />'
+        : "";
+      aBox.innerHTML = '<video controls autoplay playsinline src="' + data.animaticUrl + '">' + aTrack + '</video>';
     } else {
       aBox.textContent = data.concatNote || "Аниматик собран (без MP4).";
     }
     const est = data.estimate;
     const sizeMb = data.bytes ? (data.bytes / (1024 * 1024)).toFixed(2) + " МБ (лимит дела ФиксАР: 32 МБ)" : "—";
+    const subLinks = data.srtUrl
+      ? '<br/>Субтитры: <a href="' + data.srtUrl + '" download style="color:var(--accent)">Скачать .srt</a> · <a href="' + data.vttUrl + '" target="_blank" style="color:var(--accent)">WebVTT</a>'
+      : "";
     document.getElementById("estimateCard").innerHTML =
       "<b>Смета ФиксАР:</b> " + est.priceCredits + " кредитов (~" + est.priceRubApprox + " ₽)<br/>" +
-      "Шотов: " + est.shotCount + " · Длительность: " + est.totalDurationSec + " сек · Пересъёмок: " + est.includedRerolls + "<br/>" +
-      "Размер аниматика: " + sizeMb;
+      "Шотов: " + est.shotCount + " · Длительность (Audio-First): " + est.totalDurationSec + " сек · Пересъёмок: " + est.includedRerolls + "<br/>" +
+      "Размер аниматика: " + sizeMb + subLinks;
     document.getElementById("approveBtn").disabled = false;
     document.getElementById("filmStatus").textContent = "Аниматик готов! Проверьте и утвердите перед V2V.";
   } catch (err) {

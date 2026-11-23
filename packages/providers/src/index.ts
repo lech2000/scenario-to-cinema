@@ -140,3 +140,18 @@ export function estimateEpisodeCost(params: {
     maxCaseAttachmentBytes: 32 * 1024 * 1024,
   };
 }
+
+export {
+  AUDIO_SAMPLE_RATE,
+  MultiTierRoleAudioProvider,
+  computeFramesFromAudioDuration,
+  decodeMonoWavSamples,
+  encodeMonoWav,
+  formatSubtitlesSrt,
+  formatSubtitlesWebVtt,
+  mergeEpisodeSubtitles,
+  probeAudioDurationSec,
+  synthesizeTurnAudioTrack,
+  type RoleLineInput,
+  type SynthesizedTurnAudio,
+} from "./audio.js";

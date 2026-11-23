@@ -191,11 +191,19 @@ test("interactive session runs book ingest -> 2d6 turn -> TSX compile -> animati
     assert.equal(turnRes.status, 200);
     const turnJson = (await turnRes.json()) as {
       event: { turnIndex: number };
-      shot: { id: string };
-      media: { tsxPath: string };
+      shot: { id: string; durationInFrames: number; fps: number };
+      audio: { durationSec: number; durationInFrames: number; cues: Array<{ speakerName: string }> };
+      media: { tsxPath: string; wavUrl: string; srtUrl: string; vttUrl: string };
     };
     assert.equal(turnJson.event.turnIndex, 1);
     assert.ok(turnJson.media.tsxPath.endsWith(".tsx"));
+    assert.equal(turnJson.shot.durationInFrames, turnJson.audio.durationInFrames);
+    assert.ok(turnJson.audio.durationSec > 3);
+    assert.ok(turnJson.audio.cues.length >= 3);
+
+    const vttRes = await fetch(`${base}${turnJson.media.vttUrl}`);
+    assert.equal(vttRes.status, 200);
+    assert.match(await vttRes.text(), /^WEBVTT/);
 
     const animRes = await fetch(`${base}/v1/sessions/${sid}/animatic`, {
       method: "POST",
@@ -203,8 +211,18 @@ test("interactive session runs book ingest -> 2d6 turn -> TSX compile -> animati
       body: JSON.stringify({ tariffTier: "po_episode_stylized" }),
     });
     assert.equal(animRes.status, 200);
-    const animJson = (await animRes.json()) as { estimate: { priceCredits: number } };
+    const animJson = (await animRes.json()) as {
+      estimate: { priceCredits: number };
+      srtUrl: string;
+      vttUrl: string;
+      audioUrl: string;
+      subtitles: Array<{ index: number }>;
+    };
     assert.ok(animJson.estimate.priceCredits > 0);
+    assert.ok(animJson.srtUrl.endsWith(".srt"));
+    assert.ok(animJson.vttUrl.endsWith(".vtt"));
+    assert.ok(animJson.audioUrl.endsWith(".wav"));
+    assert.equal(animJson.subtitles.length, turnJson.audio.cues.length);
 
     const appRes = await fetch(`${base}/v1/sessions/${sid}/approve`, {
       method: "POST",
