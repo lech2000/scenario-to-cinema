@@ -9,9 +9,18 @@ import {
   type RenderJob,
   EpisodeCutSchema,
   ShotSpecSchema,
+  StylePresetIdSchema,
   TariffTierSchema,
   WorldBibleSchema,
 } from "@cinema-rpg/shared";
+import {
+  type RuntimeSessionState,
+  type StructuredLLMClient,
+  OpenAICompatibleLLMClient,
+  createInitialSession,
+  ingestScenarioText,
+  processGameTurn,
+} from "@cinema-rpg/engine";
 import { compileShotToRaeaTsx } from "@cinema-rpg/raea-dsl";
 import {
   type BillingAdapter,
@@ -20,6 +29,13 @@ import {
   MockVideoProvider,
   estimateEpisodeCost,
 } from "@cinema-rpg/providers";
+import {
+  concatMp4Clips,
+  findFfmpegBinary,
+  findRaeaBinary,
+  renderShotWithRaea,
+} from "./raea-runner.js";
+import { renderStudioHtml } from "./studio-html.js";
 
 const RollRequestSchema = z.object({
   stat: z.string().min(1),
@@ -31,6 +47,7 @@ const LivePrevizRequestSchema = z.object({
   idempotencyKey: z.string().min(1),
   shot: ShotSpecSchema,
   worldBible: WorldBibleSchema,
+  renderMp4: z.boolean().default(false),
 });
 
 const EstimateRequestSchema = z.object({
@@ -48,11 +65,36 @@ const FinalFilmRequestSchema = z.object({
   worldBible: WorldBibleSchema,
 });
 
+const CreateSessionRequestSchema = z.object({
+  scenarioText: z.string().min(10).max(120_000),
+  stylePreset: StylePresetIdSchema.default("arcane_3d"),
+  heroName: z.string().max(64).optional(),
+  title: z.string().max(120).optional(),
+  caseId: z.string().max(64).optional(),
+});
+
+const TurnRequestSchema = z.object({
+  playerInput: z.string().min(1).max(2000),
+  statToRoll: z.string().max(64).optional(),
+  renderMp4: z.boolean().default(true),
+});
+
+const AnimaticRequestSchema = z.object({
+  tariffTier: TariffTierSchema.default("po_episode_stylized"),
+});
+
+const ApproveSessionRequestSchema = z.object({
+  tariffTier: TariffTierSchema.default("po_episode_stylized"),
+  paymentGrantId: z.string().min(1),
+});
+
 export interface ConnectorOptions {
   apiKey?: string;
   videoProvider?: VideoProvider;
   billingAdapter?: BillingAdapter;
+  llmClient?: StructuredLLMClient;
   workDir?: string;
+  enableLiveRaea?: boolean;
 }
 
 export function roll2d6(stat: string, modifier: number): DiceRoll {
@@ -70,6 +112,51 @@ function sendJson(res: http.ServerResponse, status: number, body: unknown): void
     "Cache-Control": "no-store",
   });
   res.end(payload);
+}
+
+function serveMediaFile(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  filePath: string
+): void {
+  if (!fs.existsSync(filePath)) {
+    return sendJson(res, 404, { ok: false, error: "Media file not found" });
+  }
+  const stat = fs.statSync(filePath);
+  const ext = path.extname(filePath).toLowerCase();
+  const contentType =
+    ext === ".mp4"
+      ? "video/mp4"
+      : ext === ".png"
+        ? "image/png"
+        : "application/octet-stream";
+
+  const range = req.headers.range;
+  if (range && ext === ".mp4") {
+    const match = range.match(/bytes=(\d+)-(\d*)/);
+    if (match) {
+      const start = Number(match[1]);
+      const end = match[2] ? Math.min(Number(match[2]), stat.size - 1) : stat.size - 1;
+      if (start <= end && start < stat.size) {
+        res.writeHead(206, {
+          "Content-Range": `bytes ${start}-${end}/${stat.size}`,
+          "Accept-Ranges": "bytes",
+          "Content-Length": end - start + 1,
+          "Content-Type": contentType,
+        });
+        fs.createReadStream(filePath, { start, end }).pipe(res);
+        return;
+      }
+    }
+  }
+
+  res.writeHead(200, {
+    "Content-Type": contentType,
+    "Content-Length": stat.size,
+    "Accept-Ranges": "bytes",
+    "Cache-Control": "no-cache",
+  });
+  fs.createReadStream(filePath).pipe(res);
 }
 
 async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
@@ -90,16 +177,26 @@ async function readJsonBody(req: http.IncomingMessage): Promise<unknown> {
 export function createConnectorServer(opts: ConnectorOptions = {}): http.Server {
   const videoProvider = opts.videoProvider ?? new MockVideoProvider();
   const billing = opts.billingAdapter ?? new ExternalGrantBillingAdapter();
+  const llmClient = opts.llmClient ?? new OpenAICompatibleLLMClient();
+  const enableLiveRaea = opts.enableLiveRaea ?? true;
   const workDir = opts.workDir ?? path.join(os.tmpdir(), "cinema-rpg-connector");
   fs.mkdirSync(workDir, { recursive: true });
 
   const jobs = new Map<string, RenderJob>();
   const idempotencyIndex = new Map<string, string>();
+  const sessions = new Map<string, RuntimeSessionState>();
 
   return http.createServer(async (req, res) => {
     try {
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
       const method = req.method ?? "GET";
+
+      if (method === "GET" && url.pathname === "/") {
+        const html = renderStudioHtml();
+        res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+        res.end(html);
+        return;
+      }
 
       if (method === "GET" && url.pathname === "/health") {
         return sendJson(res, 200, {
@@ -107,17 +204,226 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           service: "cinema-engine-connector",
           videoProvider: videoProvider.name,
           billingMode: billing.mode,
+          llmMode: llmClient.mode,
+          raeaAvailable: enableLiveRaea && Boolean(findRaeaBinary()),
+          ffmpegAvailable: Boolean(findFfmpegBinary()),
           maxCaseAttachmentBytes: 32 * 1024 * 1024,
         });
       }
 
-      if (opts.apiKey) {
+      const mediaMatch = url.pathname.match(/^\/media\/([a-zA-Z0-9_.-]+\.(?:png|mp4))$/);
+      if (method === "GET" && mediaMatch) {
+        const safeName = path.basename(mediaMatch[1]);
+        return serveMediaFile(req, res, path.join(workDir, safeName));
+      }
+
+      if (opts.apiKey && url.pathname.startsWith("/v1/")) {
         const auth = req.headers["x-cinema-api-key"];
         if (auth !== opts.apiKey) {
           return sendJson(res, 401, { ok: false, error: "Invalid API key" });
         }
       }
 
+      // ── Interactive Prototype Sessions (Book -> WorldBible -> 2d6 -> raea) ──
+      if (method === "POST" && url.pathname === "/v1/sessions") {
+        const parsed = CreateSessionRequestSchema.parse(await readJsonBody(req));
+        const { worldBible, source } = await ingestScenarioText({
+          scenarioText: parsed.scenarioText,
+          stylePreset: parsed.stylePreset,
+          heroName: parsed.heroName,
+          title: parsed.title,
+          llm: llmClient,
+        });
+        const session = createInitialSession({
+          worldBible,
+          scenarioText: parsed.scenarioText,
+          caseId: parsed.caseId,
+        });
+        sessions.set(session.sessionId, session);
+        return sendJson(res, 201, { ok: true, source, session });
+      }
+
+      const sessionMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)$/);
+      if (method === "GET" && sessionMatch) {
+        const session = sessions.get(sessionMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        return sendJson(res, 200, { ok: true, session });
+      }
+
+      const turnMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/turns$/);
+      if (method === "POST" && turnMatch) {
+        const session = sessions.get(turnMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        const parsed = TurnRequestSchema.parse(await readJsonBody(req));
+
+        const turn = await processGameTurn({
+          session,
+          playerInput: parsed.playerInput,
+          statToRoll: parsed.statToRoll,
+          llm: llmClient,
+        });
+
+        const tsx = compileShotToRaeaTsx(turn.shot, session.worldBible);
+        const tsxPath = path.join(workDir, `${session.sessionId}_${turn.shot.id}.tsx`);
+        fs.writeFileSync(tsxPath, tsx, "utf-8");
+
+        const render = enableLiveRaea
+          ? await renderShotWithRaea({
+              tsxPath,
+              outDir: workDir,
+              shotId: `${session.sessionId}_${turn.shot.id}`,
+              keyframe: Math.floor(turn.shot.durationInFrames / 2),
+              renderMp4: parsed.renderMp4,
+            })
+          : {
+              renderedLive: false,
+              durationMs: 0,
+              note: "Live raea rendering disabled for this server instance.",
+            };
+
+        const media = {
+          tsxPath,
+          pngUrl: render.pngFile ? `/media/${render.pngFile}` : undefined,
+          mp4Url: render.mp4File ? `/media/${render.mp4File}` : undefined,
+        };
+        session.shotMedia[turn.shot.id] = media;
+
+        return sendJson(res, 200, {
+          ok: true,
+          event: turn.event,
+          shot: turn.shot,
+          suggestedChoices: turn.suggestedChoices,
+          source: turn.source,
+          render,
+          media,
+        });
+      }
+
+      const animaticMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/animatic$/);
+      if (method === "POST" && animaticMatch) {
+        const session = sessions.get(animaticMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        if (session.shots.length === 0) {
+          return sendJson(res, 422, {
+            ok: false,
+            error: "Сначала сделайте хотя бы один игровой ход.",
+          });
+        }
+        const parsed = AnimaticRequestSchema.parse(await readJsonBody(req));
+        const mp4Paths: string[] = [];
+
+        for (const shot of session.shots) {
+          const existing = session.shotMedia[shot.id];
+          const expectedMp4 = path.join(workDir, `${session.sessionId}_${shot.id}.mp4`);
+          if (fs.existsSync(expectedMp4)) {
+            mp4Paths.push(expectedMp4);
+            continue;
+          }
+          const tsxPath =
+            existing?.tsxPath ?? path.join(workDir, `${session.sessionId}_${shot.id}.tsx`);
+          if (!fs.existsSync(tsxPath)) {
+            fs.writeFileSync(tsxPath, compileShotToRaeaTsx(shot, session.worldBible), "utf-8");
+          }
+          if (enableLiveRaea) {
+            const resRender = await renderShotWithRaea({
+              tsxPath,
+              outDir: workDir,
+              shotId: `${session.sessionId}_${shot.id}`,
+              renderMp4: true,
+            });
+            if (resRender.mp4File) {
+              const p = path.join(workDir, resRender.mp4File);
+              mp4Paths.push(p);
+              session.shotMedia[shot.id] = {
+                ...existing,
+                tsxPath,
+                mp4Url: `/media/${resRender.mp4File}`,
+              };
+            }
+          }
+        }
+
+        const outFile = `${session.sessionId}_animatic.mp4`;
+        const outPath = path.join(workDir, outFile);
+        const concat = await concatMp4Clips({ mp4Paths, outPath });
+        if (concat.ok) {
+          session.animaticUrl = `/media/${outFile}`;
+        }
+
+        const totalDurationSec = session.shots.reduce(
+          (sum, s) => sum + s.durationInFrames / s.fps,
+          0
+        );
+        const estimate = estimateEpisodeCost({
+          episodeCutId: `ep_${session.sessionId}`,
+          tariffTier: parsed.tariffTier,
+          shotCount: session.shots.length,
+          totalDurationSec,
+        });
+
+        return sendJson(res, 200, {
+          ok: true,
+          animaticUrl: concat.ok ? `/media/${outFile}` : undefined,
+          bytes: concat.bytes,
+          concatNote: concat.note,
+          estimate,
+        });
+      }
+
+      const approveMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/approve$/);
+      if (method === "POST" && approveMatch) {
+        const session = sessions.get(approveMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        if (session.shots.length === 0) {
+          return sendJson(res, 422, { ok: false, error: "Нет шотов для финального рендера." });
+        }
+        const parsed = ApproveSessionRequestSchema.parse(await readJsonBody(req));
+        const episodeCutId = `ep_${session.sessionId}`;
+        const grant = await billing.verifyPaymentGrant({
+          caseId: session.caseId,
+          episodeCutId,
+          tariffTier: parsed.tariffTier,
+          paymentGrantId: parsed.paymentGrantId,
+        });
+        if (!grant.ok) {
+          return sendJson(res, 402, { ok: false, error: grant.reason });
+        }
+
+        session.animaticApproved = true;
+        const firstShot = session.shots[0];
+        const previzPath =
+          session.animaticUrl ??
+          session.shotMedia[firstShot.id]?.mp4Url ??
+          `${session.sessionId}_animatic.mp4`;
+        const { providerJobId } = await videoProvider.renderShotV2V({
+          previzVideoPath: previzPath,
+          prompt: `${session.worldBible.globalStylePrompt}. ${firstShot.v2vPrompt}`,
+          characterRefUrls: session.worldBible.characters.flatMap((c) => c.refSheetUrls),
+          durationSec: Math.ceil(
+            session.shots.reduce((sum, s) => sum + s.durationInFrames / s.fps, 0)
+          ),
+          aspectRatio: "16:9",
+          stylePreset: session.worldBible.stylePreset,
+        });
+        const polled = await videoProvider.pollJob(providerJobId);
+        const now = new Date().toISOString();
+        const job: RenderJob = {
+          jobId: `job_${crypto.randomBytes(8).toString("hex")}`,
+          kind: "final_film",
+          caseId: session.caseId,
+          idempotencyKey: `${episodeCutId}_${parsed.tariffTier}`,
+          status: polled.status === "done" ? "done" : "rendering_v2v",
+          progressPct: polled.status === "done" ? 100 : 20,
+          etaSeconds: polled.status === "done" ? 0 : 180,
+          artifactUrl: polled.videoUrl,
+          createdAt: now,
+          updatedAt: now,
+        };
+        jobs.set(job.jobId, job);
+        return sendJson(res, 202, { ok: true, job });
+      }
+
+      // ── Core FixAR Connector Endpoints ────────────────────────────────────
       if (method === "POST" && url.pathname === "/v1/dice/roll-2d6") {
         const parsed = RollRequestSchema.parse(await readJsonBody(req));
         return sendJson(res, 200, { ok: true, roll: roll2d6(parsed.stat, parsed.modifier) });
@@ -141,6 +447,15 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         const tsxPath = path.join(workDir, `${jobId}_${parsed.shot.id}.tsx`);
         fs.writeFileSync(tsxPath, tsx, "utf-8");
 
+        const render = enableLiveRaea
+          ? await renderShotWithRaea({
+              tsxPath,
+              outDir: workDir,
+              shotId: `${jobId}_${parsed.shot.id}`,
+              renderMp4: parsed.renderMp4,
+            })
+          : { renderedLive: false, durationMs: 0 };
+
         const now = new Date().toISOString();
         const job: RenderJob = {
           jobId,
@@ -151,7 +466,11 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           progressPct: 100,
           etaSeconds: 0,
           generatedTsxPath: tsxPath,
-          artifactUrl: `file://${tsxPath}`,
+          artifactUrl: render.mp4File
+            ? `/media/${render.mp4File}`
+            : render.pngFile
+              ? `/media/${render.pngFile}`
+              : `file://${tsxPath}`,
           createdAt: now,
           updatedAt: now,
         };
@@ -241,6 +560,8 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   const port = Number(process.env.PORT ?? 8787);
   const server = createConnectorServer({ apiKey: process.env.CINEMA_ENGINE_API_KEY });
   server.listen(port, "127.0.0.1", () => {
-    console.log(`Cinema Engine Connector listening on http://127.0.0.1:${port}`);
+    console.log(`Scenario-to-Cinema Studio & Connector: http://127.0.0.1:${port}`);
+    console.log(`  raea binary: ${findRaeaBinary() ?? "not found (TSX-only mode)"}`);
+    console.log(`  ffmpeg:      ${findFfmpegBinary() ?? "not found"}`);
   });
 }

@@ -47,7 +47,7 @@ const sampleShot = {
 };
 
 test("connector enforces animatic approval, payment grant, and idempotency", async () => {
-  const server = createConnectorServer();
+  const server = createConnectorServer({ enableLiveRaea: false });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const { port } = server.address() as AddressInfo;
   const base = `http://127.0.0.1:${port}`;
@@ -65,7 +65,9 @@ test("connector enforces animatic approval, payment grant, and idempotency", asy
       }),
     });
     assert.equal(estRes.status, 200);
-    const estJson = (await estRes.json()) as { estimate: { priceCredits: number; includedRerolls: number } };
+    const estJson = (await estRes.json()) as {
+      estimate: { priceCredits: number; includedRerolls: number };
+    };
     assert.equal(estJson.estimate.includedRerolls, 3);
     assert.ok(estJson.estimate.priceCredits > 1000);
 
@@ -141,9 +143,78 @@ test("connector enforces animatic approval, payment grant, and idempotency", asy
       body: validPayload,
     });
     assert.equal(retry.status, 200);
-    const retryJson = (await retry.json()) as { job: { jobId: string }; deduplicated: boolean };
+    const retryJson = (await retry.json()) as {
+      job: { jobId: string };
+      deduplicated: boolean;
+    };
     assert.equal(retryJson.deduplicated, true);
     assert.equal(retryJson.job.jobId, firstJson.job.jobId);
+  } finally {
+    server.close();
+  }
+});
+
+test("interactive session runs book ingest -> 2d6 turn -> TSX compile -> animatic estimate -> approve", async () => {
+  const server = createConnectorServer({ enableLiveRaea: false });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+
+  try {
+    const uiRes = await fetch(`${base}/`);
+    assert.equal(uiRes.status, 200);
+    assert.match(await uiRes.text(), /Книга в кино/);
+
+    const sessRes = await fetch(`${base}/v1/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        scenarioText:
+          "Проклятие Серебряного Леса. Следопыт Мира заходит в таверну, где её ждёт наёмник Шрам.",
+        stylePreset: "arcane_3d",
+        heroName: "Мира",
+      }),
+    });
+    assert.equal(sessRes.status, 201);
+    const sessJson = (await sessRes.json()) as { session: { sessionId: string } };
+    const sid = sessJson.session.sessionId;
+
+    const turnRes = await fetch(`${base}/v1/sessions/${sid}/turns`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        playerInput: "Подхожу к столу и требую правду у Шрама.",
+        statToRoll: "Смекалка",
+        renderMp4: false,
+      }),
+    });
+    assert.equal(turnRes.status, 200);
+    const turnJson = (await turnRes.json()) as {
+      event: { turnIndex: number };
+      shot: { id: string };
+      media: { tsxPath: string };
+    };
+    assert.equal(turnJson.event.turnIndex, 1);
+    assert.ok(turnJson.media.tsxPath.endsWith(".tsx"));
+
+    const animRes = await fetch(`${base}/v1/sessions/${sid}/animatic`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tariffTier: "po_episode_stylized" }),
+    });
+    assert.equal(animRes.status, 200);
+    const animJson = (await animRes.json()) as { estimate: { priceCredits: number } };
+    assert.ok(animJson.estimate.priceCredits > 0);
+
+    const appRes = await fetch(`${base}/v1/sessions/${sid}/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tariffTier: "po_episode_stylized",
+        paymentGrantId: "grant_test_001",
+      }),
+    });
+    assert.equal(appRes.status, 202);
   } finally {
     server.close();
   }

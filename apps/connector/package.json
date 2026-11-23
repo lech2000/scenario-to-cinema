@@ -10,6 +10,7 @@
     "test": "tsx --test src/server.test.ts"
   },
   "dependencies": {
+    "@cinema-rpg/engine": "*",
     "@cinema-rpg/providers": "*",
     "@cinema-rpg/raea-dsl": "*",
     "@cinema-rpg/shared": "*",

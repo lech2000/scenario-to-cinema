@@ -7,7 +7,7 @@
     "apps/*"
   ],
   "scripts": {
-    "build": "npm -w @cinema-rpg/shared run build && npm -w @cinema-rpg/raea-dsl run build && npm -w @cinema-rpg/providers run build && npm -w @cinema-rpg/connector run build",
+    "build": "npm -w @cinema-rpg/shared run build && npm -w @cinema-rpg/engine run build && npm -w @cinema-rpg/raea-dsl run build && npm -w @cinema-rpg/providers run build && npm -w @cinema-rpg/connector run build",
     "typecheck": "npm run build && npm run typecheck --workspaces",
     "test": "npm run test --workspaces --if-present",
     "spike:compile": "npm --workspace=@cinema-rpg/raea-dsl run spike:compile",

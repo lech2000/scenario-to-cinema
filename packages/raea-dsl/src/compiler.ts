@@ -178,14 +178,64 @@ export function compileShotToRaeaTsx(
   const secondaryPos = resolveZoneCenter(location, secondaryAction.fromZoneId);
   const cam = computeCameraRig(shot, focusPos, secondaryPos);
 
-  const actorsCode = shot.actors
-    .map((act, idx) => {
+  // Resolve non-overlapping actor start/end positions (enforce >= 1.35 m personal space)
+  const resolvedActors = shot.actors.map((act, idx) => {
+    const baseFrom = resolveZoneCenter(location, act.fromZoneId);
+    const baseTo = act.toZoneId ? resolveZoneCenter(location, act.toZoneId) : baseFrom;
+    return {
+      act,
+      idx,
+      from: [...baseFrom] as Vec3,
+      to: [...baseTo] as Vec3,
+    };
+  });
+
+  for (let i = 0; i < resolvedActors.length; i++) {
+    for (let j = 0; j < i; j++) {
+      const a = resolvedActors[i];
+      const b = resolvedActors[j];
+      // Prevent starting on top of an earlier actor
+      const sdx = a.from[0] - b.from[0];
+      const sdz = a.from[2] - b.from[2];
+      const sdist = Math.hypot(sdx, sdz);
+      if (sdist < 1.35) {
+        const angle = (i * 1.2) + 0.5;
+        a.from = [b.from[0] + Math.cos(angle) * 1.45, a.from[1], b.from[2] + Math.sin(angle) * 1.45];
+      }
+      // Prevent ending on top of another actor (stop 1.45 m in front along approach vector)
+      const edx = a.to[0] - b.to[0];
+      const edz = a.to[2] - b.to[2];
+      const edist = Math.hypot(edx, edz);
+      if (edist < 1.35) {
+        const vx = a.from[0] - b.to[0];
+        const vz = a.from[2] - b.to[2];
+        const vlen = Math.hypot(vx, vz) || 1;
+        a.to = [b.to[0] + (vx / vlen) * 1.45, a.to[1], b.to[2] + (vz / vlen) * 1.45];
+      }
+    }
+  }
+  // Also check actor 0 against later stationary actors (hero approaching NPC in NPC's zone)
+  if (resolvedActors.length > 1) {
+    const hero = resolvedActors[0];
+    for (let j = 1; j < resolvedActors.length; j++) {
+      const other = resolvedActors[j];
+      const edx = hero.to[0] - other.to[0];
+      const edz = hero.to[2] - other.to[2];
+      if (Math.hypot(edx, edz) < 1.35) {
+        const vx = hero.from[0] - other.to[0];
+        const vz = hero.from[2] - other.to[2];
+        const vlen = Math.hypot(vx, vz) || 1;
+        hero.to = [other.to[0] + (vx / vlen) * 1.45, hero.to[1], other.to[2] + (vz / vlen) * 1.45];
+      }
+    }
+  }
+
+  const actorsCode = resolvedActors
+    .map(({ act, idx, from, to }) => {
       const profile = world.characters.find((c) => c.id === act.characterId);
       if (!profile) {
         throw new Error(`Unknown characterId "${act.characterId}"`);
       }
-      const from = resolveZoneCenter(location, act.fromZoneId);
-      const to = act.toZoneId ? resolveZoneCenter(location, act.toZoneId) : from;
       const bobAmp = act.animation === "walk" || act.animation === "run" ? 0.06 : 0.015;
       const armRaise =
         act.animation === "draw_weapon" || act.animation === "attack_melee"

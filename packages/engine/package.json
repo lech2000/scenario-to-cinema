@@ -1,0 +1,16 @@
+{
+  "name": "@cinema-rpg/engine",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx --test src/engine.test.ts"
+  },
+  "dependencies": {
+    "@cinema-rpg/shared": "*",
+    "zod": "^3.24.1"
+  }
+}
