@@ -13,7 +13,8 @@
 - `packages/engine/` — World Builder (разбор главы книги 1–20 стр.), ИИ-Мастер с механикой `2d6`, **AI Showrunner** (`buildShowrunnerCut` — драматургическое сжатие длинной сессии в 3-актный сценарий 2–5 мин с титрами `EpisodeCredits`), генератор `ShotSpec` и клиент OpenAI-совместимых LLM (с офлайн-фолбэком для запуска без ключей).
 - `packages/raea-dsl/` — детерминированный компилятор `ShotSpec + WorldBible → raea TSX` (14-сегментные шарнирные фигуры персонажей, нативный `<Character>`, пресеты `<Look mode="paint" | "cartoon">` и спайк `src/spike-tavern-duel.ts`).
 - `packages/providers/` — Audio-First синтез речи по ролям (`MultiTierRoleAudioProvider`: OpenAI TTS / локальный macOS `say -v Milena` с тембровым разделением ролей / кроссплатформенный WAV-фолбэк), авто-тайминг кадров через `ffprobe`, генератор `.srt`/`.vtt` субтитров, SFX + ducking эмбиента, облачный Video-to-Video провайдер (`CloudV2VProvider`: `fal.ai` / `Runway` / `Kling` с авто-генерацией SVG референс-листов персонажей `ensureCharacterReferenceSheets` и контролем квот `reroll`), а также `BillingAdapter` и смета ФиксАР.
-- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор: `Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → интерактивный редактор шотов аниматика до оплаты (`POST /showrunner`, `PATCH/DELETE /shots/:shotId`, `PATCH /credits` с пересчётом TTS и сметы) → генерация финальных титров MP4 (`renderCreditsClipMp4`) → пошотовая очередь V2V `shotStates` и пересъёмка шотов (`reroll`).
+- `apps/connector/` — веб-студия (`GET /`) + асинхронный HTTP-коннектор: `Audio-First` озвучка до рендера → `raea` GPU рендер по длине аудио → интерактивный редактор шотов аниматика до оплаты (`POST /showrunner`, `PATCH/DELETE /shots/:shotId`, `PATCH /credits` с пересчётом TTS и сметы) → пошотовая очередь V2V `shotStates` с пересъёмкой шотов (`reroll`) → финальный мастеринг единого MP4 с аудио, мягкими субтитрами `mov_text`, финальными титрами и адаптивным битрейтом строго `<= 32 МБ`.
+- `fixar-pack/PUBLISHING.md` — инструкция по валидации (`/registry/validate`) и подаче релиза `v0.1.0` в каталог ФиксАР (`/pak/kabinet/`).
 - `CODER_SETUP.md` — пошаговая настройка дела `case_f6db507d967c49d9` и внешнего кодера площадки через MCP.
 
 ## Быстрый старт
@@ -25,6 +26,7 @@ npm run build
 npm test
 npm run spike:compile   # генерирует packages/raea-dsl/generated/tavern_duel_01.tsx
 npm run pack:bundle     # собирает fixar-pack/dist/book-to-film-rpg-0.1.0.tar.gz + .sha256
+npm run pack:validate   # собирает архив и проверяет манифест через живой /registry/validate
 ```
 
 Запуск веб-студии ИИ-мастера и локального 3D-рендера `raea` (`http://127.0.0.1:8787`):

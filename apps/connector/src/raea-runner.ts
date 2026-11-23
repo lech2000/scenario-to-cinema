@@ -138,12 +138,32 @@ export async function muxVideoWithAudioAndSubs(params: {
   return true;
 }
 
+export const MAX_CASE_ATTACHMENT_BYTES = 32 * 1024 * 1024;
+
+/**
+ * Computes an adaptive H.264 video bitrate (in kbps) that keeps a mastered MP4
+ * (including 128 kbps AAC audio and MP4/mov_text container overhead) strictly <= 32 MB.
+ */
+export function computeSafeVideoBitrateKbps(
+  totalDurationSec: number,
+  maxBytes: number = MAX_CASE_ATTACHMENT_BYTES
+): number {
+  const safeDuration = Math.max(1, totalDurationSec);
+  const targetPayloadBytes = Math.floor(maxBytes * 0.93); // 7% MP4 index & mux safety margin
+  const totalBitsAvailable = targetPayloadBytes * 8;
+  const audioBitsReserved = 128_000 * safeDuration;
+  const videoBps = Math.floor((totalBitsAvailable - audioBitsReserved) / safeDuration);
+  const videoKbps = Math.floor(videoBps / 1000);
+  return Math.max(320, Math.min(1800, videoKbps));
+}
+
 export async function concatMp4Clips(params: {
   mp4Paths: string[];
   episodeWavPath?: string;
   episodeSrtPath?: string;
+  totalDurationSec?: number;
   outPath: string;
-}): Promise<{ ok: boolean; bytes?: number; note?: string }> {
+}): Promise<{ ok: boolean; bytes?: number; videoBitrateKbps?: number; note?: string }> {
   const ffmpegBin = findFfmpegBinary();
   if (!ffmpegBin || params.mp4Paths.length === 0) {
     return { ok: false, note: "ffmpeg недоступен или нет MP4-клипов для склейки." };
@@ -157,6 +177,10 @@ export async function concatMp4Clips(params: {
     return { ok: true, bytes: fs.statSync(params.outPath).size };
   }
 
+  const videoBitrateKbps = computeSafeVideoBitrateKbps(params.totalDurationSec ?? 60);
+  const maxRateKbps = Math.round(videoBitrateKbps * 1.12);
+  const bufSizeKbps = videoBitrateKbps * 2;
+
   const listPath = `${params.outPath}.concat.txt`;
   const listBody = params.mp4Paths
     .map((p) => `file '${p.replace(/'/g, "'\\''")}'`)
@@ -164,7 +188,7 @@ export async function concatMp4Clips(params: {
   fs.writeFileSync(listPath, listBody, "utf-8");
 
   try {
-    // Re-encode video at ~1.8 Mbps H.264 + AAC 128k + mov_text subs (stays under FixAR's 32 MB cap)
+    // Normalize dimensions/fps and encode H.264 + AAC 128k + mov_text subs strictly <= 32 MB
     const args: string[] = [
       "-y",
       "-f",
@@ -179,14 +203,16 @@ export async function concatMp4Clips(params: {
       "0:v:0",
       ...(hasAudio ? ["-map", "1:a:0"] : []),
       ...(hasSrt ? ["-map", hasAudio ? "2:0" : "1:0"] : []),
+      "-vf",
+      "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,fps=24",
       "-c:v",
       "libx264",
       "-b:v",
-      "1800k",
+      `${videoBitrateKbps}k`,
       "-maxrate",
-      "2000k",
+      `${maxRateKbps}k`,
       "-bufsize",
-      "3600k",
+      `${bufSizeKbps}k`,
       "-pix_fmt",
       "yuv420p",
       ...(hasAudio ? ["-c:a", "aac", "-b:a", "128k", "-ac", "2"] : ["-an"]),
@@ -197,10 +223,75 @@ export async function concatMp4Clips(params: {
     ];
 
     await execFileAsync(ffmpegBin, args, { timeout: 120_000 });
-    return { ok: true, bytes: fs.statSync(params.outPath).size };
+    return {
+      ok: true,
+      bytes: fs.statSync(params.outPath).size,
+      videoBitrateKbps,
+    };
   } finally {
     if (fs.existsSync(listPath)) fs.unlinkSync(listPath);
   }
+}
+
+/**
+ * Resolves a completed V2V shot output (`https://`, `data:`, local `.mp4`, or `mock://`)
+ * into a local MP4 clip file on disk ready for FFmpeg episode mastering.
+ */
+export async function materializeV2VShotClip(params: {
+  videoUrl?: string;
+  fallbackPrevizPath?: string;
+  durationSec: number;
+  outPath: string;
+}): Promise<string | null> {
+  const { videoUrl, fallbackPrevizPath, outPath } = params;
+  const dur = Math.max(1, Number(params.durationSec.toFixed(2)));
+
+  if (videoUrl && (videoUrl.startsWith("http://") || videoUrl.startsWith("https://"))) {
+    const res = await fetch(videoUrl);
+    if (!res.ok) {
+      throw new Error(`Failed to download V2V clip (${res.status}): ${videoUrl}`);
+    }
+    const buf = Buffer.from(await res.arrayBuffer());
+    fs.writeFileSync(outPath, buf);
+    return outPath;
+  }
+
+  if (videoUrl && videoUrl.startsWith("data:video/mp4;base64,")) {
+    const b64 = videoUrl.slice("data:video/mp4;base64,".length);
+    fs.writeFileSync(outPath, Buffer.from(b64, "base64"));
+    return outPath;
+  }
+
+  if (
+    fallbackPrevizPath &&
+    fallbackPrevizPath.endsWith(".mp4") &&
+    fs.existsSync(fallbackPrevizPath)
+  ) {
+    return fallbackPrevizPath;
+  }
+
+  const ffmpegBin = findFfmpegBinary();
+  if (!ffmpegBin) return null;
+
+  await execFileAsync(
+    ffmpegBin,
+    [
+      "-y",
+      "-f",
+      "lavfi",
+      "-i",
+      `color=c=#1c2521:s=1280x720:r=24:d=${dur}`,
+      "-c:v",
+      "libx264",
+      "-pix_fmt",
+      "yuv420p",
+      "-movflags",
+      "+faststart",
+      outPath,
+    ],
+    { timeout: 30_000 }
+  );
+  return outPath;
 }
 
 function findUnicodeFontPath(): string | null {

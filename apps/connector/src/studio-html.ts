@@ -709,7 +709,23 @@ function renderV2VQueue(job) {
       "</div>";
   }).join("");
 
+  const masteredBlock = job.masteredMp4Url
+    ? '<div style="margin-bottom:10px">' +
+        '<div class="preview-box" style="margin-bottom:6px">' +
+          '<video controls autoplay playsinline src="' + job.masteredMp4Url + '?t=' + Date.now() + '">' +
+            (job.masteredVttUrl ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + job.masteredVttUrl + '" default />' : "") +
+          '</video>' +
+        '</div>' +
+        '<div class="muted"><b>Финальный V2V-фильм готов:</b> ' +
+          ((job.masteredBytes || 0) / (1024 * 1024)).toFixed(2) + ' МБ (&lt;= 32 МБ) · ' +
+          '<a href="' + job.masteredMp4Url + '" download style="color:var(--accent)">Скачать MP4</a>' +
+          (job.masteredSrtUrl ? ' · <a href="' + job.masteredSrtUrl + '" download style="color:var(--accent)">SRT</a>' : "") +
+        '</div>' +
+      '</div>'
+    : "";
+
   box.innerHTML =
+    masteredBlock +
     '<div style="margin-bottom:8px"><b>Очередь V2V (' + job.progressPct + '%)</b> · ' +
     "Бесплатных пересъёмок осталось: <b>" + freeLeft + " из " + (job.includedRerolls || 0) + "</b>" +
     extraInfo + "</div>" +

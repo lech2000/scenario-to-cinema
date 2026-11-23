@@ -6,7 +6,12 @@ import path from "node:path";
 import type { AddressInfo } from "node:net";
 import { AUDIO_SAMPLE_RATE, type AudioProvider, encodeMonoWav } from "@cinema-rpg/providers";
 import { createConnectorServer } from "./server.js";
-import { renderCreditsClipMp4 } from "./raea-runner.js";
+import {
+  MAX_CASE_ATTACHMENT_BYTES,
+  computeSafeVideoBitrateKbps,
+  findFfmpegBinary,
+  renderCreditsClipMp4,
+} from "./raea-runner.js";
 
 function createFastTestAudioProvider(dir: string): AudioProvider {
   let seq = 0;
@@ -558,9 +563,35 @@ test("AI Showrunner compresses multi-turn session and supports pre-payment shot 
     });
     assert.equal(appRes.status, 202);
     const appJson = (await appRes.json()) as {
-      job: { shotStates: Array<{ shotId: string }> };
+      job: {
+        shotStates: Array<{ shotId: string }>;
+        masteredMp4Url?: string;
+        masteredBytes?: number;
+        masteredSrtUrl?: string;
+        creditsIncluded?: boolean;
+      };
     };
     assert.equal(appJson.job.shotStates.length, 2);
+    assert.equal(appJson.job.creditsIncluded, true);
+    assert.ok(appJson.job.masteredSrtUrl?.endsWith("_final.srt"));
+
+    if (findFfmpegBinary()) {
+      assert.ok(appJson.job.masteredMp4Url?.endsWith("_final.mp4"));
+      assert.ok((appJson.job.masteredBytes ?? 0) > 1000);
+      assert.ok((appJson.job.masteredBytes ?? 0) <= MAX_CASE_ATTACHMENT_BYTES);
+
+      const mp4Res = await fetch(`${base}${appJson.job.masteredMp4Url}`);
+      assert.equal(mp4Res.status, 200);
+      assert.equal(mp4Res.headers.get("content-type"), "video/mp4");
+    }
+
+    // Verify adaptive bitrate calculator enforces <= 32 MB even for 5-minute (300s) episodes
+    const kbps120 = computeSafeVideoBitrateKbps(120);
+    const kbps300 = computeSafeVideoBitrateKbps(300);
+    assert.equal(kbps120, 1800);
+    assert.ok(kbps300 < 900 && kbps300 >= 320);
+    const estBytes300 = ((kbps300 * 1000 + 128_000) / 8) * 300;
+    assert.ok(estBytes300 < MAX_CASE_ATTACHMENT_BYTES);
   } finally {
     server.close();
     fs.rmSync(tmpDir, { recursive: true, force: true });
