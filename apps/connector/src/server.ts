@@ -28,9 +28,12 @@ import {
   type RuntimeSessionState,
   type StructuredLLMClient,
   OpenAICompatibleLLMClient,
+  buildCasePlanSnapshot,
   buildShowrunnerCut,
   createInitialSession,
+  explainCasePlan,
   ingestScenarioText,
+  parseConversationalAction,
   processGameTurn,
 } from "@cinema-rpg/engine";
 import { compileShotToRaeaTsx } from "@cinema-rpg/raea-dsl";
@@ -152,6 +155,17 @@ const UpdateCreditsRequestSchema = z.object({
 const ApproveSessionRequestSchema = z.object({
   tariffTier: TariffTierSchema.default("po_episode_stylized"),
   paymentGrantId: z.string().min(1),
+});
+
+const ConverseRequestSchema = z.object({
+  sessionId: z.string().optional(),
+  message: z.string().min(1).max(120_000),
+  targetPlanItemId: z.string().max(64).optional(),
+  stylePreset: StylePresetIdSchema.optional(),
+  heroName: z.string().max(64).optional(),
+  tariffTier: TariffTierSchema.default("po_episode_stylized"),
+  renderMp4: z.boolean().default(true),
+  speakReply: z.boolean().default(false),
 });
 
 interface JobContext {
@@ -352,6 +366,304 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
   const idempotencyIndex = new Map<string, string>();
   const sessions = new Map<string, RuntimeSessionState>();
   const sessionFinalJobId = new Map<string, string>();
+
+  function getSessionPlan(session?: RuntimeSessionState, tariffTier?: TariffTier) {
+    const finId = session ? sessionFinalJobId.get(session.sessionId) : undefined;
+    const finJob = finId ? jobs.get(finId)?.job : undefined;
+    const est = session?.episodeCut
+      ? computeCutEstimate(session.episodeCut, tariffTier)
+      : undefined;
+    return buildCasePlanSnapshot({
+      session,
+      finalJob: finJob,
+      lastEstimate: est,
+    });
+  }
+
+  async function synthesizeAgentVoiceUrl(text: string, tag: string): Promise<string | undefined> {
+    try {
+      const clean = text.replace(/[*_`#>•]/g, " ").replace(/\s+/g, " ").trim().slice(0, 650);
+      if (!clean) return undefined;
+      const out = await audioProvider.synthesizeSpeech({
+        text: clean,
+        voiceId: "voice_ru_narrator",
+        emotion: "neutral",
+      });
+      const destName = `guide_${tag}_${Date.now()}.wav`.replace(/[^a-zA-Z0-9_.-]/g, "_");
+      const destPath = path.join(workDir, destName);
+      if (out.audioPath !== destPath) {
+        fs.copyFileSync(out.audioPath, destPath);
+      }
+      return `/media/${destName}`;
+    } catch {
+      return undefined;
+    }
+  }
+
+  async function executeSessionTurn(
+    session: RuntimeSessionState,
+    params: { playerInput: string; statToRoll?: string; renderMp4: boolean }
+  ) {
+    const turn = await processGameTurn({
+      session,
+      playerInput: params.playerInput,
+      statToRoll: params.statToRoll,
+      llm: llmClient,
+    });
+
+    const baseName = `${session.sessionId}_${turn.shot.id}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+    const roleLines = buildRoleLinesForTurn(turn.event, session.worldBible);
+    const audioTrack = await synthesizeTurnAudioTrack({
+      outDir: workDir,
+      baseName,
+      lines: roleLines,
+      sfxTags: turn.shot.audio?.sfxTags ?? [],
+      fps: turn.shot.fps,
+      provider: audioProvider,
+    });
+
+    turn.shot.durationInFrames = audioTrack.durationInFrames;
+    turn.shot.audio = {
+      ...(turn.shot.audio ?? { sfxTags: [] }),
+      ttsAudioPath: audioTrack.wavPath,
+      audioDurationSec: audioTrack.durationSec,
+      subtitles: audioTrack.cues,
+    };
+
+    const tsx = compileShotToRaeaTsx(turn.shot, session.worldBible);
+    const tsxPath = path.join(workDir, `${baseName}.tsx`);
+    fs.writeFileSync(tsxPath, tsx, "utf-8");
+
+    const render = enableLiveRaea
+      ? await renderShotWithRaea({
+          tsxPath,
+          outDir: workDir,
+          shotId: baseName,
+          keyframe: Math.floor(turn.shot.durationInFrames / 2),
+          renderMp4: params.renderMp4,
+        })
+      : {
+          renderedLive: false,
+          durationMs: 0,
+          note: "Live raea rendering disabled for this server instance.",
+        };
+
+    if (render.mp4File) {
+      await muxVideoWithAudioAndSubs({
+        mp4Path: path.join(workDir, render.mp4File),
+        wavPath: audioTrack.wavPath,
+        srtPath: audioTrack.srtPath,
+      });
+    }
+
+    const media = {
+      tsxPath,
+      pngUrl: render.pngFile ? `/media/${render.pngFile}` : undefined,
+      mp4Url: render.mp4File ? `/media/${render.mp4File}` : undefined,
+      wavUrl: `/media/${path.basename(audioTrack.wavPath)}`,
+      srtUrl: `/media/${path.basename(audioTrack.srtPath)}`,
+      vttUrl: `/media/${path.basename(audioTrack.vttPath)}`,
+      wavPath: audioTrack.wavPath,
+      durationSec: audioTrack.durationSec,
+    };
+    session.shotMedia[turn.shot.id] = media;
+
+    return {
+      event: turn.event,
+      shot: turn.shot,
+      suggestedChoices: turn.suggestedChoices,
+      source: turn.source,
+      audio: {
+        provider: audioTrack.providerName,
+        durationSec: audioTrack.durationSec,
+        durationInFrames: audioTrack.durationInFrames,
+        cues: audioTrack.cues,
+      },
+      render,
+      media,
+    };
+  }
+
+  async function assembleSessionDraftAnimatic(
+    session: RuntimeSessionState,
+    params: {
+      tariffTier: TariffTier;
+      includeCredits?: boolean;
+      customTitle?: string;
+      directedBy?: string;
+    }
+  ) {
+    if (!session.episodeCut) {
+      const cutRes = await buildShowrunnerCut({
+        cutId: `ep_${session.sessionId}`,
+        caseId: session.caseId,
+        worldBible: session.worldBible,
+        events: session.events,
+        shots: session.shots,
+        tariffTier: params.tariffTier,
+        customTitle: params.customTitle,
+        directedBy: params.directedBy,
+        includeCredits: params.includeCredits ?? true,
+        llm: llmClient,
+      });
+      session.episodeCut = cutRes.episodeCut;
+    } else {
+      session.episodeCut.tariffTier = params.tariffTier;
+      if (session.episodeCut.credits) {
+        if (params.includeCredits !== undefined) {
+          session.episodeCut.credits.enabled = params.includeCredits;
+        }
+        if (params.customTitle) {
+          session.episodeCut.credits.episodeTitle = params.customTitle;
+          session.episodeCut.title = params.customTitle;
+        }
+        if (params.directedBy) {
+          session.episodeCut.credits.directedBy = params.directedBy;
+        }
+      }
+    }
+
+    const activeCut = session.episodeCut;
+    const mp4Paths: string[] = [];
+    const shotSampleChunks: Int16Array[] = [];
+    const shotSubtitleInputs: Array<{ durationSec: number; cues: SubtitleCue[] }> = [];
+
+    for (const shot of activeCut.shots) {
+      const baseName = `${session.sessionId}_${shot.id}`.replace(/[^a-zA-Z0-9_-]/g, "_");
+      const existing = session.shotMedia[shot.id];
+      const wavPath = existing?.wavPath ?? path.join(workDir, `${baseName}.wav`);
+      if (fs.existsSync(wavPath)) {
+        const decoded = decodeMonoWavSamples(fs.readFileSync(wavPath));
+        shotSampleChunks.push(decoded.samples);
+        shotSubtitleInputs.push({
+          durationSec: decoded.samples.length / decoded.sampleRate,
+          cues: shot.audio?.subtitles ?? [],
+        });
+      } else {
+        shotSubtitleInputs.push({
+          durationSec: shot.durationInFrames / shot.fps,
+          cues: shot.audio?.subtitles ?? [],
+        });
+      }
+
+      const expectedMp4 = path.join(workDir, `${baseName}.mp4`);
+      if (fs.existsSync(expectedMp4)) {
+        mp4Paths.push(expectedMp4);
+        continue;
+      }
+      const tsxPath = existing?.tsxPath ?? path.join(workDir, `${baseName}.tsx`);
+      if (!fs.existsSync(tsxPath)) {
+        fs.writeFileSync(tsxPath, compileShotToRaeaTsx(shot, session.worldBible), "utf-8");
+      }
+      if (enableLiveRaea) {
+        const resRender = await renderShotWithRaea({
+          tsxPath,
+          outDir: workDir,
+          shotId: baseName,
+          renderMp4: true,
+        });
+        if (resRender.mp4File) {
+          const p = path.join(workDir, resRender.mp4File);
+          mp4Paths.push(p);
+          session.shotMedia[shot.id] = {
+            ...existing,
+            tsxPath,
+            mp4Url: `/media/${resRender.mp4File}`,
+          };
+        }
+      }
+    }
+
+    const epBase = `${session.sessionId}_animatic`;
+    let creditsIncluded = false;
+    if (activeCut.credits && activeCut.credits.enabled !== false) {
+      const creditsSec = activeCut.credits.durationSec ?? 4;
+      const castLine =
+        activeCut.credits.starring.length > 0
+          ? ` · В ролях: ${activeCut.credits.starring.slice(0, 3).join(", ")}`
+          : "";
+      shotSubtitleInputs.push({
+        durationSec: creditsSec,
+        cues: [
+          {
+            index: 1,
+            startSec: 0.2,
+            endSec: Number(Math.max(1.2, creditsSec - 0.2).toFixed(3)),
+            speakerId: "credits",
+            speakerName: "ТИТРЫ",
+            text: `«${activeCut.credits.episodeTitle}»${castLine} · Режиссёр: ${activeCut.credits.directedBy}`,
+          },
+        ],
+      });
+      if (shotSampleChunks.length > 0) {
+        shotSampleChunks.push(synthesizeOutroChord(creditsSec, AUDIO_SAMPLE_RATE));
+      }
+      if (mp4Paths.length > 0) {
+        const creditsMp4Path = path.join(workDir, `${epBase}_credits.mp4`);
+        const creditsRender = await renderCreditsClipMp4({
+          credits: activeCut.credits,
+          outPath: creditsMp4Path,
+          matchVideoPath: mp4Paths[0],
+        });
+        if (creditsRender.ok) {
+          mp4Paths.push(creditsMp4Path);
+          creditsIncluded = true;
+        }
+      } else {
+        creditsIncluded = true;
+      }
+    }
+
+    const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
+    const epSrtFile = `${epBase}.srt`;
+    const epVttFile = `${epBase}.vtt`;
+    const epSrtPath = path.join(workDir, epSrtFile);
+    const epVttPath = path.join(workDir, epVttFile);
+    fs.writeFileSync(epSrtPath, formatSubtitlesSrt(mergedCues), "utf-8");
+    fs.writeFileSync(epVttPath, formatSubtitlesWebVtt(mergedCues), "utf-8");
+
+    let epWavPath: string | undefined;
+    let epWavFile: string | undefined;
+    if (shotSampleChunks.length > 0) {
+      const totalLen = shotSampleChunks.reduce((acc, s) => acc + s.length, 0);
+      const masterSamples = new Int16Array(totalLen);
+      let offset = 0;
+      for (const chunk of shotSampleChunks) {
+        masterSamples.set(chunk, offset);
+        offset += chunk.length;
+      }
+      epWavFile = `${epBase}.wav`;
+      epWavPath = path.join(workDir, epWavFile);
+      fs.writeFileSync(epWavPath, encodeMonoWav(masterSamples, AUDIO_SAMPLE_RATE));
+    }
+
+    const outFile = `${epBase}.mp4`;
+    const outPath = path.join(workDir, outFile);
+    const concat = await concatMp4Clips({
+      mp4Paths,
+      episodeWavPath: epWavPath,
+      episodeSrtPath: epSrtPath,
+      outPath,
+    });
+    if (concat.ok) {
+      session.animaticUrl = `/media/${outFile}`;
+    }
+
+    const estimate = computeCutEstimate(activeCut, params.tariffTier);
+
+    return {
+      animaticUrl: concat.ok ? `/media/${outFile}` : undefined,
+      audioUrl: epWavFile ? `/media/${epWavFile}` : undefined,
+      srtUrl: `/media/${epSrtFile}`,
+      vttUrl: `/media/${epVttFile}`,
+      subtitles: mergedCues,
+      episodeCut: activeCut,
+      creditsIncluded,
+      bytes: concat.bytes,
+      concatNote: concat.note,
+      estimate,
+    };
+  }
 
   async function masterFinalJobEpisode(ctx: JobContext): Promise<void> {
     const { job, shots, worldBible } = ctx;
@@ -758,6 +1070,383 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         }
       }
 
+      // ── Simplified Conversational Pipeline & Case Plan ────────────────────
+      if (method === "GET" && url.pathname === "/v1/plan-preview") {
+        const plan = getSessionPlan(undefined);
+        const welcome = await explainCasePlan({ plan });
+        return sendJson(res, 200, { ok: true, plan, welcome });
+      }
+
+      const sessionPlanMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/plan$/);
+      if (method === "GET" && sessionPlanMatch) {
+        const session = sessions.get(sessionPlanMatch[1]);
+        if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
+        return sendJson(res, 200, { ok: true, plan: getSessionPlan(session) });
+      }
+
+      if (method === "POST" && url.pathname === "/v1/converse") {
+        const parsed = ConverseRequestSchema.parse(await readJsonBody(req));
+        let session = parsed.sessionId ? sessions.get(parsed.sessionId) : undefined;
+        const finJobId = session ? sessionFinalJobId.get(session.sessionId) : undefined;
+        const hasFinalJob = Boolean(finJobId && jobs.has(finJobId));
+
+        if (parsed.targetPlanItemId) {
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const explained = await explainCasePlan({
+            plan,
+            targetItemId: parsed.targetPlanItemId,
+            userQuestion: parsed.message,
+            llm: llmClient,
+          });
+          const voiceUrl = parsed.speakReply
+            ? await synthesizeAgentVoiceUrl(explained.replyText, parsed.targetPlanItemId)
+            : undefined;
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "explanation",
+            sessionId: session?.sessionId,
+            replyText: explained.replyText,
+            highlightedItemId: explained.highlightedItemId,
+            followUpActions: explained.followUpActions,
+            voiceUrl,
+            plan,
+          });
+        }
+
+        const intent = parseConversationalAction({
+          message: parsed.message,
+          hasSession: Boolean(session),
+          hasShots: Boolean(session && session.shots.length > 0),
+          hasDraft: Boolean(session?.episodeCut),
+          hasFinalJob,
+          preferredStyle: parsed.stylePreset,
+          preferredHeroName: parsed.heroName,
+        });
+
+        if (intent.kind === "explain_plan") {
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const explained = await explainCasePlan({
+            plan,
+            targetItemId: intent.targetItemId,
+            userQuestion: parsed.message,
+            llm: llmClient,
+          });
+          const voiceUrl = parsed.speakReply
+            ? await synthesizeAgentVoiceUrl(explained.replyText, "plan")
+            : undefined;
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "explanation",
+            sessionId: session?.sessionId,
+            replyText: explained.replyText,
+            highlightedItemId: explained.highlightedItemId,
+            followUpActions: explained.followUpActions,
+            voiceUrl,
+            plan,
+          });
+        }
+
+        if (intent.kind === "start_book") {
+          const { worldBible, source } = await ingestScenarioText({
+            scenarioText: intent.scenarioText,
+            stylePreset: intent.stylePreset,
+            heroName: intent.heroName,
+            llm: llmClient,
+          });
+          ensureCharacterReferenceSheets({ worldBible, outDir: workDir });
+          session = createInitialSession({
+            worldBible,
+            scenarioText: intent.scenarioText,
+          });
+          sessions.set(session.sessionId, session);
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const hero = worldBible.characters[0];
+          const replyText = [
+            `✓ **Пункт 1 выполнен** — мир **«${worldBible.title}»** готов (стиль: *${worldBible.stylePreset}*).`,
+            `Место действия: **${worldBible.locations[0].name}**. Герои сцены: ${worldBible.characters.map((c) => `**${c.name}**`).join(", ")}.`,
+            "",
+            `Переходим к **Пункту 2 (Живая сцена 2d6)**: ${worldBible.sourceExcerptSummary}`,
+            `Скажите голосом или напишите, что сейчас делает **${hero.name}**!`,
+          ].join("\n");
+          const voiceUrl = parsed.speakReply
+            ? await synthesizeAgentVoiceUrl(replyText, session.sessionId)
+            : undefined;
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "world_created",
+            sessionId: session.sessionId,
+            source,
+            worldBible,
+            replyText,
+            voiceUrl,
+            plan,
+          });
+        }
+
+        if (!session) {
+          return sendJson(res, 404, { ok: false, error: "Сессия не найдена" });
+        }
+
+        if (intent.kind === "play_turn") {
+          const turnOut = await executeSessionTurn(session, {
+            playerInput: intent.playerInput,
+            renderMp4: parsed.renderMp4,
+          });
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const r = turnOut.event.diceRoll!;
+          const outcomeRu =
+            r.outcome === "success"
+              ? "Чистый успех"
+              : r.outcome === "partial"
+                ? "Успех с ценой"
+                : "Опасный поворот";
+          const replyText = [
+            `🎲 **Бросок 2d6 (${r.stat}): [${r.dice[0]}+${r.dice[1]}] + ${r.modifier} = ${r.total} — ${outcomeRu}**`,
+            turnOut.event.narrativeText,
+            "",
+            session.events.length >= 2
+              ? "*Можете продолжать диалог дальше или сказать: «Собери черновик фильма», чтобы перейти к Пункту 3.*"
+              : "*Что ваш герой предпримет дальше?*",
+          ].join("\n");
+
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "story_turn",
+            sessionId: session.sessionId,
+            replyText,
+            event: turnOut.event,
+            shot: turnOut.shot,
+            media: turnOut.media,
+            suggestedChoices: turnOut.suggestedChoices,
+            voiceUrl: turnOut.media.wavUrl,
+            plan,
+          });
+        }
+
+        if (intent.kind === "build_draft") {
+          const draftOut = await assembleSessionDraftAnimatic(session, {
+            tariffTier: parsed.tariffTier,
+          });
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const est = draftOut.estimate;
+          const replyText = [
+            `🎬 **Пункт 3 готов — собран 3-актный черновик фильма «${draftOut.episodeCut.title}»!**`,
+            `• В монтаже **${est.shotCount} кадр.** общей длительностью **${est.totalDurationSec} сек** (с финальными титрами).`,
+            `• **Прозрачная смета ФиксАР:** **${est.priceCredits} кредитов** (~${est.priceRubApprox} ₽), включено бесплатных пересъёмок: **${est.includedRerolls}**.`,
+            "",
+            `Посмотрите черновик ниже. До оплаты любые правки бесплатны — скажите, например: *«В 1 кадре сделай крупный план»*, *«Удали 2 кадр»* или скажите **«Утверждаю, выпускай финальный фильм»** для перехода к Пункту 4.`,
+          ].join("\n");
+
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "draft_ready",
+            sessionId: session.sessionId,
+            replyText,
+            ...draftOut,
+            plan,
+          });
+        }
+
+        if (intent.kind === "edit_draft") {
+          if (!session.episodeCut) {
+            const cutRes = await buildShowrunnerCut({
+              cutId: `ep_${session.sessionId}`,
+              caseId: session.caseId,
+              worldBible: session.worldBible,
+              events: session.events,
+              shots: session.shots,
+              tariffTier: parsed.tariffTier,
+              llm: llmClient,
+            });
+            session.episodeCut = cutRes.episodeCut;
+          }
+
+          if (intent.customTitle) {
+            session.episodeCut.title = intent.customTitle;
+            if (session.episodeCut.credits) {
+              session.episodeCut.credits.episodeTitle = intent.customTitle;
+            }
+          } else {
+            const idx = Math.max(
+              0,
+              Math.min(session.episodeCut.shots.length - 1, (intent.shotIndex ?? 1) - 1)
+            );
+            const targetShot = session.episodeCut.shots[idx];
+            if (intent.deleteShot) {
+              if (session.episodeCut.shots.length <= 1) {
+                return sendJson(res, 422, {
+                  ok: false,
+                  error: "В черновике должен остаться хотя бы один кадр.",
+                });
+              }
+              session.episodeCut.shots.splice(idx, 1);
+              if (session.episodeCut.beats) {
+                session.episodeCut.beats = session.episodeCut.beats.filter(
+                  (b) => b.shotId !== targetShot.id
+                );
+              }
+            } else {
+              if (intent.cameraMode) {
+                targetShot.camera.mode = intent.cameraMode;
+              }
+              const baseName = `${session.sessionId}_${targetShot.id}`.replace(
+                /[^a-zA-Z0-9_-]/g,
+                "_"
+              );
+              const staleMp4 = path.join(workDir, `${baseName}.mp4`);
+              if (fs.existsSync(staleMp4)) fs.unlinkSync(staleMp4);
+
+              if (intent.dialogueText) {
+                const speakerId =
+                  targetShot.audio?.dialogueLine?.speakerId ??
+                  targetShot.actors[0]?.characterId ??
+                  session.worldBible.characters[0].id;
+                const prof = session.worldBible.characters.find((c) => c.id === speakerId);
+                const audioTrack = await synthesizeTurnAudioTrack({
+                  outDir: workDir,
+                  baseName,
+                  lines: [
+                    {
+                      speakerId,
+                      speakerName: prof?.name ?? speakerId,
+                      role: prof?.role ?? "protagonist",
+                      voiceId: prof?.voiceId ?? "voice_ru_narrator",
+                      text: intent.dialogueText,
+                      emotion: "tense",
+                    },
+                  ],
+                  sfxTags: targetShot.audio?.sfxTags ?? [],
+                  fps: targetShot.fps,
+                  provider: audioProvider,
+                });
+                targetShot.durationInFrames = audioTrack.durationInFrames;
+                targetShot.audio = {
+                  ...(targetShot.audio ?? { sfxTags: [] }),
+                  dialogueLine: { speakerId, text: intent.dialogueText, emotion: "tense" },
+                  ttsAudioPath: audioTrack.wavPath,
+                  audioDurationSec: audioTrack.durationSec,
+                  subtitles: audioTrack.cues,
+                };
+                session.shotMedia[targetShot.id] = {
+                  ...session.shotMedia[targetShot.id],
+                  wavPath: audioTrack.wavPath,
+                  wavUrl: `/media/${path.basename(audioTrack.wavPath)}`,
+                  srtUrl: `/media/${path.basename(audioTrack.srtPath)}`,
+                  vttUrl: `/media/${path.basename(audioTrack.vttPath)}`,
+                  durationSec: audioTrack.durationSec,
+                };
+              }
+              const tsxPath = path.join(workDir, `${baseName}.tsx`);
+              fs.writeFileSync(
+                tsxPath,
+                compileShotToRaeaTsx(targetShot, session.worldBible),
+                "utf-8"
+              );
+              session.shotMedia[targetShot.id] = {
+                ...session.shotMedia[targetShot.id],
+                tsxPath,
+              };
+            }
+          }
+
+          const draftOut = await assembleSessionDraftAnimatic(session, {
+            tariffTier: parsed.tariffTier,
+          });
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const replyText = [
+            `✏️ **Черновик обновлён!** Сейчас в монтаже **${draftOut.estimate.shotCount} кадр.** (${draftOut.estimate.totalDurationSec} сек).`,
+            `Обновлённая смета: **${draftOut.estimate.priceCredits} кредитов** (~${draftOut.estimate.priceRubApprox} ₽).`,
+            `Когда всё нравится — скажите **«Утверждаю, выпускай финальный фильм»**.`,
+          ].join("\n");
+
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "draft_edited",
+            sessionId: session.sessionId,
+            replyText,
+            ...draftOut,
+            plan,
+          });
+        }
+
+        if (intent.kind === "approve_film") {
+          if (!session.episodeCut) {
+            await assembleSessionDraftAnimatic(session, { tariffTier: parsed.tariffTier });
+          }
+          const activeShots = session.episodeCut?.shots ?? session.shots;
+          session.animaticApproved = true;
+          if (session.episodeCut) session.episodeCut.animaticApproved = true;
+
+          const jobId = `job_${crypto.randomBytes(8).toString("hex")}`;
+          const previzByShotId: Record<string, string> = {};
+          const shotWavByShotId: Record<string, string> = {};
+          for (const s of activeShots) {
+            const media = session.shotMedia[s.id];
+            previzByShotId[s.id] = media?.mp4Url
+              ? path.join(workDir, path.basename(media.mp4Url))
+              : media?.tsxPath ?? `${session.sessionId}_${s.id}.mp4`;
+            if (media?.wavPath) shotWavByShotId[s.id] = media.wavPath;
+          }
+
+          const ctx = await runPerShotV2VQueue({
+            jobId,
+            caseId: session.caseId,
+            idempotencyKey: `conv_${session.sessionId}_${Date.now()}`,
+            tariffTier: parsed.tariffTier,
+            shots: activeShots,
+            worldBible: session.worldBible,
+            previzByShotId,
+            shotWavByShotId,
+            credits: session.episodeCut?.credits,
+          });
+          sessionFinalJobId.set(session.sessionId, jobId);
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const sizeMb = (((ctx.job.masteredBytes ?? 0) / (1024 * 1024)) || 0).toFixed(2);
+          const replyText = [
+            `🎉 **Пункт 4 выполнен — финальный мини-фильм готов!**`,
+            `Все ${activeShots.length} кадр. сведены с озвучкой, субтитрами и финальными титрами (${sizeMb} МБ <= 32 МБ).`,
+            `Бесплатных пересъёмок в запасе: **${(ctx.job.includedRerolls ?? 0) - (ctx.job.usedFreeRerolls ?? 0)}** — если захотите другой дубль, просто скажите: *«Пересними 1 кадр»*.`,
+          ].join("\n");
+
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "film_ready",
+            sessionId: session.sessionId,
+            replyText,
+            job: ctx.job,
+            plan,
+          });
+        }
+
+        if (intent.kind === "reroll_shot") {
+          const ctx = finJobId ? jobs.get(finJobId) : undefined;
+          if (!ctx || !ctx.job.shotStates?.length) {
+            return sendJson(res, 422, { ok: false, error: "Сначала выпустите финальный фильм." });
+          }
+          const idx = Math.max(
+            0,
+            Math.min(ctx.job.shotStates.length - 1, intent.shotIndex - 1)
+          );
+          const targetShotId = ctx.job.shotStates[idx].shotId;
+          const resReroll = await handleRerollShot(ctx, { shotId: targetShotId });
+          if (resReroll.status !== 200) {
+            return sendJson(res, resReroll.status, resReroll.body);
+          }
+          const plan = getSessionPlan(session, parsed.tariffTier);
+          const freeLeft =
+            (ctx.job.includedRerolls ?? 0) - (ctx.job.usedFreeRerolls ?? 0);
+          const replyText = `↻ **Кадр #${idx + 1} (${targetShotId}) переснят** с новым дублем, финальный MP4 пересобран! Бесплатных пересъёмок осталось: **${freeLeft}**.`;
+          return sendJson(res, 200, {
+            ok: true,
+            kind: "shot_rerolled",
+            sessionId: session.sessionId,
+            replyText,
+            job: ctx.job,
+            plan,
+          });
+        }
+      }
+
       // ── Interactive Prototype Sessions ────────────────────────────────────
       if (method === "POST" && url.pathname === "/v1/sessions") {
         const parsed = CreateSessionRequestSchema.parse(await readJsonBody(req));
@@ -791,94 +1480,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
         const session = sessions.get(turnMatch[1]);
         if (!session) return sendJson(res, 404, { ok: false, error: "Session not found" });
         const parsed = TurnRequestSchema.parse(await readJsonBody(req));
-
-        const turn = await processGameTurn({
-          session,
-          playerInput: parsed.playerInput,
-          statToRoll: parsed.statToRoll,
-          llm: llmClient,
-        });
-
-        const baseName = `${session.sessionId}_${turn.shot.id}`.replace(
-          /[^a-zA-Z0-9_-]/g,
-          "_"
-        );
-
-        const roleLines = buildRoleLinesForTurn(turn.event, session.worldBible);
-        const audioTrack = await synthesizeTurnAudioTrack({
-          outDir: workDir,
-          baseName,
-          lines: roleLines,
-          sfxTags: turn.shot.audio?.sfxTags ?? [],
-          fps: turn.shot.fps,
-          provider: audioProvider,
-        });
-
-        turn.shot.durationInFrames = audioTrack.durationInFrames;
-        turn.shot.audio = {
-          ...(turn.shot.audio ?? { sfxTags: [] }),
-          ttsAudioPath: audioTrack.wavPath,
-          audioDurationSec: audioTrack.durationSec,
-          subtitles: audioTrack.cues,
-        };
-
-        const tsx = compileShotToRaeaTsx(turn.shot, session.worldBible);
-        const tsxPath = path.join(workDir, `${baseName}.tsx`);
-        fs.writeFileSync(tsxPath, tsx, "utf-8");
-
-        const render = enableLiveRaea
-          ? await renderShotWithRaea({
-              tsxPath,
-              outDir: workDir,
-              shotId: baseName,
-              keyframe: Math.floor(turn.shot.durationInFrames / 2),
-              renderMp4: parsed.renderMp4,
-            })
-          : {
-              renderedLive: false,
-              durationMs: 0,
-              note: "Live raea rendering disabled for this server instance.",
-            };
-
-        if (render.mp4File) {
-          await muxVideoWithAudioAndSubs({
-            mp4Path: path.join(workDir, render.mp4File),
-            wavPath: audioTrack.wavPath,
-            srtPath: audioTrack.srtPath,
-          });
-        }
-
-        const wavName = path.basename(audioTrack.wavPath);
-        const srtName = path.basename(audioTrack.srtPath);
-        const vttName = path.basename(audioTrack.vttPath);
-
-        const media = {
-          tsxPath,
-          pngUrl: render.pngFile ? `/media/${render.pngFile}` : undefined,
-          mp4Url: render.mp4File ? `/media/${render.mp4File}` : undefined,
-          wavUrl: `/media/${wavName}`,
-          srtUrl: `/media/${srtName}`,
-          vttUrl: `/media/${vttName}`,
-          wavPath: audioTrack.wavPath,
-          durationSec: audioTrack.durationSec,
-        };
-        session.shotMedia[turn.shot.id] = media;
-
-        return sendJson(res, 200, {
-          ok: true,
-          event: turn.event,
-          shot: turn.shot,
-          suggestedChoices: turn.suggestedChoices,
-          source: turn.source,
-          audio: {
-            provider: audioTrack.providerName,
-            durationSec: audioTrack.durationSec,
-            durationInFrames: audioTrack.durationInFrames,
-            cues: audioTrack.cues,
-          },
-          render,
-          media,
-        });
+        const out = await executeSessionTurn(session, parsed);
+        return sendJson(res, 200, { ok: true, ...out });
       }
 
       const showrunnerMatch = url.pathname.match(
@@ -1176,181 +1779,8 @@ export function createConnectorServer(opts: ConnectorOptions = {}): http.Server 
           });
         }
         const parsed = AnimaticRequestSchema.parse(await readJsonBody(req));
-
-        if (!session.episodeCut) {
-          const cutRes = await buildShowrunnerCut({
-            cutId: `ep_${session.sessionId}`,
-            caseId: session.caseId,
-            worldBible: session.worldBible,
-            events: session.events,
-            shots: session.shots,
-            tariffTier: parsed.tariffTier,
-            customTitle: parsed.customTitle,
-            directedBy: parsed.directedBy,
-            includeCredits: parsed.includeCredits ?? true,
-            llm: llmClient,
-          });
-          session.episodeCut = cutRes.episodeCut;
-        } else {
-          session.episodeCut.tariffTier = parsed.tariffTier;
-          if (session.episodeCut.credits) {
-            if (parsed.includeCredits !== undefined) {
-              session.episodeCut.credits.enabled = parsed.includeCredits;
-            }
-            if (parsed.customTitle) {
-              session.episodeCut.credits.episodeTitle = parsed.customTitle;
-              session.episodeCut.title = parsed.customTitle;
-            }
-            if (parsed.directedBy) {
-              session.episodeCut.credits.directedBy = parsed.directedBy;
-            }
-          }
-        }
-
-        const activeCut = session.episodeCut;
-        const mp4Paths: string[] = [];
-        const shotSampleChunks: Int16Array[] = [];
-        const shotSubtitleInputs: Array<{ durationSec: number; cues: SubtitleCue[] }> = [];
-
-        for (const shot of activeCut.shots) {
-          const baseName = `${session.sessionId}_${shot.id}`.replace(
-            /[^a-zA-Z0-9_-]/g,
-            "_"
-          );
-          const existing = session.shotMedia[shot.id];
-          const wavPath = existing?.wavPath ?? path.join(workDir, `${baseName}.wav`);
-          if (fs.existsSync(wavPath)) {
-            const decoded = decodeMonoWavSamples(fs.readFileSync(wavPath));
-            shotSampleChunks.push(decoded.samples);
-            shotSubtitleInputs.push({
-              durationSec: decoded.samples.length / decoded.sampleRate,
-              cues: shot.audio?.subtitles ?? [],
-            });
-          } else {
-            shotSubtitleInputs.push({
-              durationSec: shot.durationInFrames / shot.fps,
-              cues: shot.audio?.subtitles ?? [],
-            });
-          }
-
-          const expectedMp4 = path.join(workDir, `${baseName}.mp4`);
-          if (fs.existsSync(expectedMp4)) {
-            mp4Paths.push(expectedMp4);
-            continue;
-          }
-          const tsxPath = existing?.tsxPath ?? path.join(workDir, `${baseName}.tsx`);
-          if (!fs.existsSync(tsxPath)) {
-            fs.writeFileSync(tsxPath, compileShotToRaeaTsx(shot, session.worldBible), "utf-8");
-          }
-          if (enableLiveRaea) {
-            const resRender = await renderShotWithRaea({
-              tsxPath,
-              outDir: workDir,
-              shotId: baseName,
-              renderMp4: true,
-            });
-            if (resRender.mp4File) {
-              const p = path.join(workDir, resRender.mp4File);
-              mp4Paths.push(p);
-              session.shotMedia[shot.id] = {
-                ...existing,
-                tsxPath,
-                mp4Url: `/media/${resRender.mp4File}`,
-              };
-            }
-          }
-        }
-
-        const epBase = `${session.sessionId}_animatic`;
-        let creditsIncluded = false;
-        if (activeCut.credits && activeCut.credits.enabled !== false) {
-          const creditsSec = activeCut.credits.durationSec ?? 4;
-          const castLine =
-            activeCut.credits.starring.length > 0
-              ? ` · В ролях: ${activeCut.credits.starring.slice(0, 3).join(", ")}`
-              : "";
-          shotSubtitleInputs.push({
-            durationSec: creditsSec,
-            cues: [
-              {
-                index: 1,
-                startSec: 0.2,
-                endSec: Number(Math.max(1.2, creditsSec - 0.2).toFixed(3)),
-                speakerId: "credits",
-                speakerName: "ТИТРЫ",
-                text: `«${activeCut.credits.episodeTitle}»${castLine} · Режиссёр: ${activeCut.credits.directedBy}`,
-              },
-            ],
-          });
-          if (shotSampleChunks.length > 0) {
-            shotSampleChunks.push(synthesizeOutroChord(creditsSec, AUDIO_SAMPLE_RATE));
-          }
-          if (mp4Paths.length > 0) {
-            const creditsMp4Path = path.join(workDir, `${epBase}_credits.mp4`);
-            const creditsRender = await renderCreditsClipMp4({
-              credits: activeCut.credits,
-              outPath: creditsMp4Path,
-              matchVideoPath: mp4Paths[0],
-            });
-            if (creditsRender.ok) {
-              mp4Paths.push(creditsMp4Path);
-              creditsIncluded = true;
-            }
-          } else {
-            creditsIncluded = true;
-          }
-        }
-
-        const mergedCues = mergeEpisodeSubtitles(shotSubtitleInputs);
-        const epSrtFile = `${epBase}.srt`;
-        const epVttFile = `${epBase}.vtt`;
-        const epSrtPath = path.join(workDir, epSrtFile);
-        const epVttPath = path.join(workDir, epVttFile);
-        fs.writeFileSync(epSrtPath, formatSubtitlesSrt(mergedCues), "utf-8");
-        fs.writeFileSync(epVttPath, formatSubtitlesWebVtt(mergedCues), "utf-8");
-
-        let epWavPath: string | undefined;
-        let epWavFile: string | undefined;
-        if (shotSampleChunks.length > 0) {
-          const totalLen = shotSampleChunks.reduce((acc, s) => acc + s.length, 0);
-          const masterSamples = new Int16Array(totalLen);
-          let offset = 0;
-          for (const chunk of shotSampleChunks) {
-            masterSamples.set(chunk, offset);
-            offset += chunk.length;
-          }
-          epWavFile = `${epBase}.wav`;
-          epWavPath = path.join(workDir, epWavFile);
-          fs.writeFileSync(epWavPath, encodeMonoWav(masterSamples, AUDIO_SAMPLE_RATE));
-        }
-
-        const outFile = `${epBase}.mp4`;
-        const outPath = path.join(workDir, outFile);
-        const concat = await concatMp4Clips({
-          mp4Paths,
-          episodeWavPath: epWavPath,
-          episodeSrtPath: epSrtPath,
-          outPath,
-        });
-        if (concat.ok) {
-          session.animaticUrl = `/media/${outFile}`;
-        }
-
-        const estimate = computeCutEstimate(activeCut, parsed.tariffTier);
-
-        return sendJson(res, 200, {
-          ok: true,
-          animaticUrl: concat.ok ? `/media/${outFile}` : undefined,
-          audioUrl: epWavFile ? `/media/${epWavFile}` : undefined,
-          srtUrl: `/media/${epSrtFile}`,
-          vttUrl: `/media/${epVttFile}`,
-          subtitles: mergedCues,
-          episodeCut: activeCut,
-          creditsIncluded,
-          bytes: concat.bytes,
-          concatNote: concat.note,
-          estimate,
-        });
+        const out = await assembleSessionDraftAnimatic(session, parsed);
+        return sendJson(res, 200, { ok: true, ...out });
       }
 
       const approveMatch = url.pathname.match(/^\/v1\/sessions\/(sess_[a-f0-9]+)\/approve$/);

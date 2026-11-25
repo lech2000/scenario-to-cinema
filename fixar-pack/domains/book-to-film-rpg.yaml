@@ -16,33 +16,25 @@ case_templates:
       - {key: visual_style, title: "Пресет стиля (photoreal_cinema / arcane_3d / anime / noir)", kind: text, required: false}
       - {key: hero_name, title: "Имя и краткий образ героя", kind: text, required: false}
     workflow:
-      initial_state: intake
+      initial_state: book_intake
       states:
-        - intake
-        - world_building
-        - playing
-        - animatic_review
-        - payment_approval
-        - rendering
-        - done
-      terminal_states: [done]
+        - book_intake
+        - story_play
+        - draft_cut
+        - final_film
+      terminal_states: [final_film]
       transitions:
-        - {source: intake, target: world_building}
-        - {source: world_building, target: playing}
-        - {source: playing, target: animatic_review}
-        - {source: animatic_review, target: playing}
-        - {source: animatic_review, target: payment_approval}
-        - {source: payment_approval, target: animatic_review}
-        - {source: payment_approval, target: rendering}
-        - {source: rendering, target: animatic_review}
-        - {source: rendering, target: done}
+        - {source: book_intake, target: story_play}
+        - {source: story_play, target: draft_cut}
+        - {source: draft_cut, target: story_play}
+        - {source: draft_cut, target: final_film}
     required_capabilities: [dialog, case_patch]
     approvals:
       human_from: 2
       always_require: [propose_decision]
     done_criteria:
-      - Игровая история доведена до финала либо поставлена на паузу по решению игрока.
-      - Сгенерирован и приложен к делу артефакт (озвученный 3D-аниматик либо финальный фильм MP4 до 32 МБ / ссылка на мастер-копию).
+      - Агент дела разъяснил человеку этапы плана и провёл сессию через 4 шага без технического жаргона.
+      - Сгенерирован и приложен к делу итоговый видеоартефакт (озвученный 3D-аниматик или финальный мини-фильм MP4 до 32 МБ с титрами).
 
 tariffs:
   - id: po_animatic
@@ -131,25 +123,26 @@ document_kinds:
   - финальный мини-фильм
 
 agents:
-  - id: world-builder
-    title: "Архитектор мира"
+  - id: case-guide
+    title: "Ведущий дела и ИИ-проводник"
     purpose: >-
-      Читаешь загруженную главу книги (1–20 стр.) и строишь Библию мира:
-      локации с пространственными зонами и пропами, список персонажей с
-      3–5 характеристиками и описанием внешности под выбранный стиль, а также
-      граф ключевых сюжетных узлов. Подготавливаешь стартовую сцену для
-      ИИ-мастера.
-    label: book_to_film_rpg_world_builder
+      Ведёшь человека в спокойном текстовом и голосовом диалоге по 4 простым
+      пунктам дела (1. Глава и герои → 2. Живая сцена 2d6 → 3. Черновик и смета →
+      4. Готовый фильм). По любому вопросу и на каждом переходе простыми словами
+      разъясняешь все пункты плана дела: что уже сделано, зачем нужен текущий
+      шаг, какую фразу сказать голосом или написать дальше и какие шаги полностью
+      бесплатны, а где требуется согласие на смету в кредитах.
+    label: book_to_film_rpg_case_guide
     side: need_help
     capabilities: [dialog, case_patch]
     tools: []
     web_search: false
-    match_priority: 60
+    match_priority: 95
     model: mimo-v2.5
     never:
-      - "не запускаешь платный видеорендер и не обещаешь бесплатную генерацию видео"
-      - "не копируешь исходную книгу дословно и не выдаёшь её за официальное издание"
-      - "не изменяешь и не удаляешь исходные файлы пользователя"
+      - "не перегружаешь человека внутренним техническим жаргоном (JSON, TSX, сэмплы, сиды)"
+      - "не запускаешь платный выпуск фильма без показа сметы и явного согласия человека"
+      - "не изменяешь и не удаляешь исходные файлы книги пользователя"
 
   - id: game-master
     title: "ИИ-Мастер и 3D-оператор"

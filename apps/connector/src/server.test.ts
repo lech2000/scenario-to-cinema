@@ -597,3 +597,91 @@ test("AI Showrunner compresses multi-turn session and supports pre-payment shot 
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test("simplified conversational pipeline (/v1/converse + /v1/plan-preview) drives all 4 steps and explains case items via dialogue", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "cinema-converse-test-"));
+  const server = createConnectorServer({
+    enableLiveRaea: false,
+    workDir: tmpDir,
+    audioProvider: createFastTestAudioProvider(tmpDir),
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  const base = `http://127.0.0.1:${port}`;
+
+  async function say(message: string, sessionId?: string, targetPlanItemId?: string) {
+    const res = await fetch(`${base}/v1/converse`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId,
+        message,
+        targetPlanItemId,
+        renderMp4: false,
+        speakReply: true,
+      }),
+    });
+    assert.equal(res.status, 200);
+    return (await res.json()) as Record<string, any>;
+  }
+
+  try {
+    // 0. Plan preview on page load
+    const prevRes = await fetch(`${base}/v1/plan-preview`);
+    assert.equal(prevRes.status, 200);
+    const prevJson = (await prevRes.json()) as {
+      plan: { items: Array<{ id: string }> };
+      welcome: { replyText: string };
+    };
+    assert.equal(prevJson.plan.items.length, 4);
+
+    // 1. Ask Case Guide to explain all plan items
+    const expAll = await say("Разъясни все пункты дела");
+    assert.equal(expAll.kind, "explanation");
+    assert.match(expAll.replyText, /4 понятных шага/);
+    assert.ok(expAll.voiceUrl?.startsWith("/media/guide_"));
+
+    // 2. Start Step 1 by natural Russian command
+    const w = await say("Начни по тестовой главе в стиле нуар");
+    assert.equal(w.kind, "world_created");
+    const sid = w.sessionId as string;
+    assert.ok(sid.startsWith("sess_"));
+    assert.equal(w.plan.currentStage, "story_play");
+
+    // 3. Play two turns via natural dialogue (Step 2)
+    const t1 = await say("Подхожу к Шраму и требую правду про обоз", sid);
+    assert.equal(t1.kind, "story_turn");
+    const t2 = await say("Кладу ладонь на клинок и смотрю ему в глаза", sid);
+    assert.equal(t2.kind, "story_turn");
+
+    // 4. Explain specific item #3 by clicking schema node
+    const exp3 = await say("Расскажи про этот шаг", sid, "step_3_draft");
+    assert.equal(exp3.kind, "explanation");
+    assert.equal(exp3.highlightedItemId, "step_3_draft");
+
+    // 5. Build 3-act draft + estimate in one conversational step (Step 3)
+    const draft = await say("Собери черновик фильма", sid);
+    assert.equal(draft.kind, "draft_ready");
+    assert.equal(draft.plan.currentStage, "draft_cut");
+    assert.ok(draft.estimate.priceCredits > 0);
+
+    // 6. Edit shot #1 camera via natural voice/text phrase
+    const edited = await say("В 1 кадре сделай крупный план", sid);
+    assert.equal(edited.kind, "draft_edited");
+    assert.equal(edited.episodeCut.shots[0].camera.mode, "close_up");
+
+    // 7. Approve and produce final film (Step 4)
+    const film = await say("Утверждаю, выпускай финальный фильм", sid);
+    assert.equal(film.kind, "film_ready");
+    assert.equal(film.plan.currentStage, "final_film");
+    assert.equal(film.plan.progressPct, 100);
+
+    // 8. Reroll shot #1 conversationally
+    const reroll = await say("Пересними 1 кадр", sid);
+    assert.equal(reroll.kind, "shot_rerolled");
+    assert.equal(reroll.job.usedFreeRerolls, 1);
+  } finally {
+    server.close();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});

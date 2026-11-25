@@ -313,3 +313,44 @@ export const RenderJobSchema = z.object({
   updatedAt: z.string(),
 });
 export type RenderJob = z.infer<typeof RenderJobSchema>;
+
+export const SimplifiedStageIdSchema = z.enum([
+  "book_intake",
+  "story_play",
+  "draft_cut",
+  "final_film",
+]);
+export type SimplifiedStageId = z.infer<typeof SimplifiedStageIdSchema>;
+
+export const QuickActionChipSchema = z.object({
+  label: z.string().min(1),
+  prompt: z.string().min(1),
+});
+export type QuickActionChip = z.infer<typeof QuickActionChipSchema>;
+
+export const CasePlanItemSchema = z.object({
+  id: z.string().min(1),
+  stepNumber: z.number().int().min(1).max(10),
+  stageId: SimplifiedStageIdSchema,
+  title: z.string().min(1),
+  subtitle: z.string().min(1),
+  status: z.enum(["pending", "active", "done"]),
+  costBadge: z.string().min(1),
+  explanation: z.object({
+    what: z.string().min(1),
+    why: z.string().min(1),
+    howToAct: z.string().min(1),
+    deliverable: z.string().min(1),
+  }),
+  quickActions: z.array(QuickActionChipSchema).default([]),
+});
+export type CasePlanItem = z.infer<typeof CasePlanItemSchema>;
+
+export const CasePlanSnapshotSchema = z.object({
+  caseId: z.string().min(1),
+  currentStage: SimplifiedStageIdSchema,
+  progressPct: z.number().int().min(0).max(100),
+  items: z.array(CasePlanItemSchema).min(1),
+  contextualActions: z.array(QuickActionChipSchema).default([]),
+});
+export type CasePlanSnapshot = z.infer<typeof CasePlanSnapshotSchema>;

@@ -1,798 +1,1090 @@
 export function renderStudioHtml(): string {
   return `<!doctype html>
-<html lang="ru">
+<html lang="ru" data-theme="light">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
-<title>Книга в кино · ИИ-НРИ + 3D raea Studio</title>
+<title>Книга в кино · Диалог и План дела</title>
 <style>
   :root {
-    --bg: #0f1312;
-    --panel: #161d1a;
-    --panel-2: #1c2521;
-    --line: #2d3b34;
-    --text: #eef4f0;
-    --muted: #98a99f;
-    --accent: #a685e2;
-    --accent-soft: rgba(166, 133, 226, 0.14);
-    --green: #69d494;
-    --amber: #f0b66e;
-    --red: #ec7b7b;
-    --radius: 14px;
+    --bg: #f6f3ec;
+    --surface: #fffdf9;
+    --surface-2: #efebe1;
+    --ink: #1b2420;
+    --muted: #5f6c65;
+    --line: #dcd6c8;
+    --accent: #c2542d;
+    --accent-soft: rgba(194, 84, 45, 0.11);
+    --sage: #286c4b;
+    --sage-soft: rgba(40, 108, 75, 0.12);
+    --amber: #9c6514;
+    --amber-soft: rgba(156, 101, 20, 0.13);
+    --shadow: 0 8px 28px rgba(27, 36, 32, 0.06);
+    --radius: 18px;
+  }
+  html[data-theme="dark"] {
+    --bg: #121614;
+    --surface: #191f1c;
+    --surface-2: #222a26;
+    --ink: #eef2ee;
+    --muted: #9aa8a0;
+    --line: #2d3832;
+    --accent: #e27853;
+    --accent-soft: rgba(226, 120, 83, 0.15);
+    --sage: #58c28b;
+    --sage-soft: rgba(88, 194, 139, 0.15);
+    --amber: #eab25c;
+    --amber-soft: rgba(234, 178, 92, 0.15);
+    --shadow: 0 10px 30px rgba(0, 0, 0, 0.28);
   }
   * { box-sizing: border-box; }
   body {
     margin: 0;
     background: var(--bg);
-    color: var(--text);
-    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--ink);
+    font: 15px/1.58 -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, Roboto, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
   }
+  .serif {
+    font-family: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  }
+
+  /* ── Top Bar ── */
   header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--line);
+    padding: 12px 22px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 20px;
-    border-bottom: 1px solid var(--line);
-    background: var(--panel);
+    gap: 12px;
+    flex-wrap: wrap;
   }
-  header h1 { margin: 0; font-size: 17px; letter-spacing: -0.02em; }
-  .badge {
+  .brand {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .brand h1 {
+    margin: 0;
+    font-size: 20px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+  .pill {
     display: inline-flex;
     align-items: center;
     gap: 6px;
-    padding: 4px 10px;
+    padding: 4px 11px;
     border-radius: 999px;
     font-size: 12px;
+    font-weight: 500;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .pill.accent {
     background: var(--accent-soft);
-    border: 1px solid rgba(166, 133, 226, 0.35);
+    border-color: color-mix(in srgb, var(--accent) 32%, transparent);
     color: var(--accent);
   }
-  main {
-    display: grid;
-    grid-template-columns: 320px 1fr 420px;
-    gap: 14px;
-    padding: 14px;
-    height: calc(100vh - 57px);
+  .pill.sage {
+    background: var(--sage-soft);
+    border-color: color-mix(in srgb, var(--sage) 32%, transparent);
+    color: var(--sage);
   }
-  @media (max-width: 1120px) {
-    main { grid-template-columns: 1fr; height: auto; }
-  }
-  .col {
+  .top-actions {
     display: flex;
-    flex-direction: column;
-    gap: 12px;
-    min-height: 0;
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: var(--radius);
-    padding: 14px;
-    overflow: auto;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
   }
-  h2 {
-    margin: 0;
-    font-size: 13px;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    color: var(--muted);
-  }
-  label { display: block; font-size: 12px; color: var(--muted); margin: 8px 0 4px; }
-  textarea, input, select {
-    width: 100%;
-    background: var(--bg);
-    color: var(--text);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 8px 10px;
-    font: inherit;
-  }
-  textarea { resize: vertical; }
+
   button {
     cursor: pointer;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #120d1c;
-    font-weight: 650;
-    padding: 9px 13px;
-    border-radius: 10px;
     font: inherit;
-  }
-  button.ghost {
-    background: transparent;
-    color: var(--text);
-    border-color: var(--line);
-  }
-  button.small { padding: 5px 9px; font-size: 12px; }
-  button:disabled { opacity: 0.5; cursor: default; }
-  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-  .card {
-    background: var(--panel-2);
+    font-size: 13.5px;
+    font-weight: 600;
+    border-radius: 999px;
+    padding: 8px 15px;
     border: 1px solid var(--line);
-    border-radius: 11px;
-    padding: 10px 12px;
+    background: var(--surface);
+    color: var(--ink);
+    transition: transform 0.12s ease, border-color 0.15s ease, background 0.15s ease;
   }
-  .chat-log {
-    flex: 1;
-    overflow-y: auto;
+  button:hover:not(:disabled) {
+    border-color: var(--accent);
+  }
+  button:active:not(:disabled) {
+    transform: translateY(1px);
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  button.sage {
+    background: var(--sage);
+    border-color: var(--sage);
+    color: #fff;
+  }
+  button.small {
+    padding: 5px 11px;
+    font-size: 12px;
+  }
+
+  /* ── Visual Plan-Schema (4 Connected Steps) ── */
+  .schema-wrap {
+    max-width: 960px;
+    width: 100%;
+    margin: 16px auto 0;
+    padding: 0 18px;
+  }
+  .schema-card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    box-shadow: var(--shadow);
+  }
+  .schema-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .schema-title {
+    font-size: 12.5px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted);
+  }
+  .progress-track {
+    width: 100%;
+    height: 4px;
+    background: var(--surface-2);
+    border-radius: 99px;
+    overflow: hidden;
+    margin-bottom: 14px;
+  }
+  .progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, var(--sage), var(--accent));
+    transition: width 0.35s ease;
+  }
+  .schema-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 10px;
+    position: relative;
+  }
+  @media (max-width: 820px) {
+    .schema-grid { grid-template-columns: repeat(2, 1fr); }
+  }
+  @media (max-width: 500px) {
+    .schema-grid { grid-template-columns: 1fr; }
+  }
+  .step-node {
+    text-align: left;
+    border-radius: 14px;
+    padding: 11px 13px;
+    background: var(--bg);
+    border: 1.5px solid var(--line);
     display: flex;
     flex-direction: column;
-    gap: 10px;
-    padding-right: 4px;
+    gap: 4px;
+    position: relative;
+    cursor: pointer;
   }
-  .msg {
-    padding: 10px 12px;
-    border-radius: 12px;
-    border: 1px solid var(--line);
-    background: var(--panel-2);
-  }
-  .msg.player {
-    align-self: flex-end;
-    max-width: 86%;
+  .step-node.active {
     background: var(--accent-soft);
-    border-color: rgba(166, 133, 226, 0.35);
+    border-color: var(--accent);
   }
-  .roll {
-    display: inline-block;
+  .step-node.done {
+    background: var(--sage-soft);
+    border-color: color-mix(in srgb, var(--sage) 45%, var(--line));
+  }
+  .step-node.inspected {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .step-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    font-size: 11.5px;
+  }
+  .step-status {
+    font-weight: 700;
+  }
+  .step-node.done .step-status { color: var(--sage); }
+  .step-node.active .step-status { color: var(--accent); }
+  .step-node.pending .step-status { color: var(--muted); }
+  .step-name {
+    font-weight: 700;
+    font-size: 14px;
+    color: var(--ink);
+  }
+  .step-sub {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.35;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .inspector-drawer {
+    margin-top: 12px;
+    padding: 13px 15px;
+    border-radius: 13px;
+    background: var(--bg);
+    border: 1px dashed var(--line);
+    font-size: 13.5px;
+    display: none;
+  }
+  .inspector-drawer.open { display: block; }
+  .inspector-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px 16px;
+    margin: 8px 0 10px;
+  }
+  @media (max-width: 680px) {
+    .inspector-grid { grid-template-columns: 1fr; }
+  }
+
+  /* ── Main Dialogue Stream ── */
+  .dialogue-shell {
+    flex: 1;
+    max-width: 860px;
+    width: 100%;
+    margin: 0 auto;
+    padding: 18px 18px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .stream {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .turn {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    animation: fadeUp 0.2s ease-out;
+  }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .bubble {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 15px 18px;
+    box-shadow: var(--shadow);
+    max-width: 92%;
+  }
+  .turn.user {
+    align-items: flex-end;
+  }
+  .turn.user .bubble {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    border-bottom-right-radius: 5px;
+    max-width: 78%;
+  }
+  .turn.agent .bubble {
+    border-bottom-left-radius: 5px;
+  }
+  .speaker-tag {
     font-size: 11.5px;
     font-weight: 700;
-    padding: 2px 8px;
-    border-radius: 999px;
-    margin-bottom: 6px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    margin-bottom: 5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
-  .roll.success { background: rgba(105,212,148,0.16); color: var(--green); }
-  .roll.partial { background: rgba(240,182,110,0.16); color: var(--amber); }
-  .roll.fail { background: rgba(236,123,123,0.16); color: var(--red); }
-  .choices { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
-  .choices button { text-align: left; font-weight: 500; font-size: 12.5px; }
-  .preview-box {
+  .prose p { margin: 0 0 8px; }
+  .prose p:last-child { margin-bottom: 0; }
+
+  /* ── Inline Visual Cards inside Stream ── */
+  .media-card {
+    margin-top: 12px;
+    border-radius: 14px;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    background: var(--bg);
+  }
+  .video-stage {
     width: 100%;
     aspect-ratio: 16 / 9;
-    background: #090b0a;
-    border: 1px solid var(--line);
-    border-radius: 11px;
-    overflow: hidden;
+    background: #0d110f;
     display: grid;
     place-items: center;
-    color: var(--muted);
-    font-size: 12.5px;
+    color: #9aa8a0;
+    font-size: 13px;
   }
-  .preview-box img, .preview-box video {
+  .video-stage video, .video-stage img {
     width: 100%;
     height: 100%;
     object-fit: cover;
     display: block;
   }
-  pre {
-    margin: 0;
-    padding: 8px;
-    border-radius: 8px;
-    background: #0b0e0d;
-    border: 1px solid var(--line);
-    font-size: 11px;
-    overflow: auto;
-    max-height: 160px;
-  }
-  .muted { color: var(--muted); font-size: 12px; }
-  .status { font-size: 12px; color: var(--amber); min-height: 18px; }
-  .ref-grid {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 8px;
-  }
-  .ref-item {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    padding: 4px 8px 4px 4px;
-    border: 1px solid var(--line);
-    border-radius: 9px;
-    background: var(--bg);
-    font-size: 11.5px;
-  }
-  .ref-item img {
-    width: 34px;
-    height: 34px;
-    border-radius: 6px;
-    object-fit: cover;
-    border: 1px solid var(--line);
-  }
-  .shot-queue {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-  }
-  .shot-row {
+  .media-bar {
+    padding: 9px 13px;
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
-    padding: 8px 10px;
-    border-radius: 9px;
-    border: 1px solid var(--line);
-    background: var(--bg);
-    font-size: 12px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    color: var(--muted);
   }
+  .cast-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 10px;
+  }
+  .cast-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 11px 5px 5px;
+    border-radius: 999px;
+    background: var(--bg);
+    border: 1px solid var(--line);
+    font-size: 12.5px;
+    text-decoration: none;
+    color: inherit;
+  }
+  .cast-chip img {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    object-fit: cover;
+  }
+  .beats-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 10px 13px;
+    border-top: 1px solid var(--line);
+  }
+  .beat-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    font-size: 12.5px;
+    padding: 6px 9px;
+    border-radius: 10px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+  }
+
+  /* ── Sticky Voice + Text Composer ── */
+  .composer-wrap {
+    position: sticky;
+    bottom: 0;
+    z-index: 15;
+    background: linear-gradient(180deg, transparent, var(--bg) 22%);
+    padding: 10px 18px 18px;
+  }
+  .composer-inner {
+    max-width: 860px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .chips-row {
+    display: flex;
+    gap: 7px;
+    flex-wrap: wrap;
+  }
+  .chip {
+    font-size: 12.5px;
+    font-weight: 500;
+    padding: 6px 12px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+  }
+  .composer-box {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    background: var(--surface);
+    border: 1.5px solid var(--line);
+    border-radius: 999px;
+    padding: 6px 8px 6px 10px;
+    box-shadow: var(--shadow);
+  }
+  .composer-box:focus-within {
+    border-color: var(--accent);
+  }
+  .mic-btn {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    font-size: 18px;
+    flex-shrink: 0;
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+    color: var(--accent);
+  }
+  .mic-btn.listening {
+    background: var(--accent);
+    color: #fff;
+    animation: pulseRing 1.25s infinite;
+  }
+  @keyframes pulseRing {
+    0% { box-shadow: 0 0 0 0 rgba(194, 84, 45, 0.45); }
+    70% { box-shadow: 0 0 0 12px rgba(194, 84, 45, 0); }
+    100% { box-shadow: 0 0 0 0 rgba(194, 84, 45, 0); }
+  }
+  #chatInput {
+    flex: 1;
+    border: 0;
+    outline: none;
+    background: transparent;
+    color: var(--ink);
+    font: inherit;
+    font-size: 15px;
+    padding: 6px 4px;
+    min-width: 0;
+  }
+  .status-line {
+    font-size: 12px;
+    color: var(--muted);
+    padding: 0 8px;
+    min-height: 18px;
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  /* ── Book Chapter Sheet Modal ── */
+  .modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: rgba(15, 20, 18, 0.48);
+    backdrop-filter: blur(4px);
+    display: none;
+    place-items: center;
+    padding: 16px;
+  }
+  .modal-backdrop.open { display: grid; }
+  .modal-sheet {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    max-width: 600px;
+    width: 100%;
+    padding: 20px 22px;
+    box-shadow: var(--shadow);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .modal-sheet textarea, .modal-sheet input, .modal-sheet select {
+    width: 100%;
+    background: var(--bg);
+    color: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font: inherit;
+  }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 </style>
 </head>
 <body>
+
 <header>
-  <h1>Книга в кино · Прототип ИИ-НРИ + 3D raea</h1>
-  <div class="row">
-    <span class="badge" id="healthBadge">Проверка движка…</span>
-    <span class="badge">ФиксАР Пак: cinema-rpg/book-to-film-rpg@0.1.0</span>
+  <div class="brand">
+    <h1 class="serif">Книга в кино</h1>
+    <span class="pill" id="engineBadge">Подключение…</span>
+  </div>
+  <div class="top-actions">
+    <button type="button" class="small" id="explainAllBtn">🗺 Разъяснить все пункты дела</button>
+    <button type="button" class="small" id="openBookModalBtn">📎 Глава книги</button>
+    <button type="button" class="small" id="voiceOutToggle" aria-pressed="true">🔊 Озвучка: ВКЛ</button>
+    <button type="button" class="small" id="themeToggle" title="Переключить светлую/тёмную тему">◐ Тема</button>
   </div>
 </header>
 
-<main>
-  <!-- Left: Scenario & World Bible -->
-  <section class="col">
-    <h2>1. Сценарий и Библия мира</h2>
+<!-- Visual Plan-Schema of the Case -->
+<section class="schema-wrap" aria-label="Визуальная схема плана дела">
+  <div class="schema-card">
+    <div class="schema-head">
+      <span class="schema-title">Визуальный план-схема дела · 4 шага (нажмите любой пункт для разъяснения)</span>
+      <span class="pill accent" id="stageCounterPill">Шаг 1 из 4</span>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="progressFill" style="width:12%"></div></div>
+    <div class="schema-grid" id="schemaGrid"></div>
+    <div class="inspector-drawer" id="inspectorDrawer"></div>
+  </div>
+</section>
+
+<!-- Main Conversational + Voice Stream -->
+<main class="dialogue-shell">
+  <div class="stream" id="stream"></div>
+</main>
+
+<!-- Bottom Voice + Text Composer -->
+<footer class="composer-wrap">
+  <div class="composer-inner">
+    <div class="chips-row" id="chipsRow"></div>
+    <form class="composer-box" id="chatForm">
+      <button type="button" class="mic-btn" id="micBtn" title="Голосовой ввод (русский язык)">🎙</button>
+      <input
+        id="chatInput"
+        autocomplete="off"
+        placeholder="Скажите голосом 🎙 или напишите действие героя / вопрос по делу…"
+      />
+      <button type="submit" class="primary" id="sendBtn">Отправить</button>
+    </form>
+    <div class="status-line">
+      <span id="statusText">Готов к диалогу — нажмите на микрофон 🎙 или выберите подсказку выше.</span>
+      <span id="audioIndicator"></span>
+    </div>
+  </div>
+</footer>
+
+<!-- Clean Slide-Up Sheet for Uploading/Pasting Full Book Chapter -->
+<div class="modal-backdrop" id="bookModal">
+  <div class="modal-sheet">
+    <div class="row" style="justify-content:space-between">
+      <strong class="serif" style="font-size:18px">Загрузить главу книги (1–20 стр.)</strong>
+      <button type="button" class="small" id="closeBookModalBtn">✕ Закрыть</button>
+    </div>
     <div class="row">
-      <button type="button" class="ghost small" id="loadSampleBtn">Загрузить тестовую главу</button>
-      <label style="margin:0; cursor:pointer" class="badge">
-        Открыть .txt/.md
+      <button type="button" class="small" id="fillSampleBtn">Подставить тестовую главу</button>
+      <label class="pill" style="cursor:pointer">
+        Выбрать .txt / .md файл
         <input id="fileInput" type="file" accept=".txt,.md,text/plain" style="display:none" />
       </label>
     </div>
-    <label for="scenarioText">Текст главы книги (1–20 стр.)</label>
-    <textarea id="scenarioText" rows="6" placeholder="Вставьте фрагмент книги или нажмите «Загрузить тестовую главу»…"></textarea>
+    <textarea id="chapterTextarea" rows="7" placeholder="Вставьте текст главы книги или сценария…"></textarea>
     <div class="row">
       <div style="flex:1">
-        <label for="stylePreset">Стиль фильма</label>
-        <select id="stylePreset">
-          <option value="arcane_3d">Анимация Arcane (3D)</option>
-          <option value="photoreal_cinema">Кинореализм (35mm)</option>
+        <small style="color:var(--muted)">Атмосфера фильма</small>
+        <select id="styleSelect">
+          <option value="arcane_3d">Живописный 3D (Arcane)</option>
+          <option value="noir">Детективный нуар</option>
           <option value="anime">Аниме</option>
-          <option value="noir">Нуар</option>
+          <option value="photoreal_cinema">Кинореализм (35 мм)</option>
         </select>
       </div>
       <div style="flex:1">
-        <label for="heroName">Имя героя</label>
-        <input id="heroName" placeholder="Напр. Мира" value="Мира" />
+        <small style="color:var(--muted)">Имя вашего героя</small>
+        <input id="heroInput" value="Мира" placeholder="Напр. Мира" />
       </div>
     </div>
-    <button type="button" id="startBtn">Создать мир (World Bible)</button>
-    <div id="worldSummary" class="card muted">Мир ещё не создан.</div>
-  </section>
-
-  <!-- Center: AI Game Master Chat -->
-  <section class="col">
-    <h2>2. ИИ-Мастер и механика 2d6</h2>
-    <div class="chat-log" id="chatLog">
-      <div class="muted">Создайте мир слева, чтобы начать первую сцену.</div>
+    <div class="row" style="justify-content:flex-end">
+      <button type="button" class="primary" id="submitChapterBtn">Создать мир и начать диалог</button>
     </div>
-    <div class="choices" id="choicesBox"></div>
-    <div class="row">
-      <select id="statSelect" style="width:150px" disabled>
-        <option value="Смекалка">Смекалка</option>
-      </select>
-      <label class="row" style="margin:0; font-size:12px; color:var(--muted)">
-        <input type="checkbox" id="renderMp4Check" checked style="width:auto" />
-        Рендерить MP4 на ход
-      </label>
-    </div>
-    <form id="turnForm" class="row">
-      <input id="turnInput" placeholder="Опишите действие вашего героя…" disabled style="flex:1" />
-      <button type="submit" id="sendBtn" disabled>Ход (2d6)</button>
-    </form>
-    <div class="status" id="turnStatus"></div>
-  </section>
-
-  <!-- Right: Live 3D Previz (raea) & Episode Animatic -->
-  <section class="col">
-    <h2>3. Живой 3D-превиз (raea) и Фильм</h2>
-    <div class="preview-box" id="previzBox">Здесь появится 3D-кадр / клип raea</div>
-    <div class="muted" id="previzMeta">Ожидает первого хода…</div>
-    <details>
-      <summary class="muted" style="cursor:pointer">Показать ShotSpec JSON</summary>
-      <pre id="shotJson">{}</pre>
-    </details>
-
-    <hr style="border:0; border-top:1px solid var(--line); width:100%" />
-    <h2>4. AI Showrunner, Редактор шотов и 3D-Аниматик</h2>
-    <div class="row">
-      <select id="tariffSelect" style="flex:1">
-        <option value="po_animatic">Аудио-аниматик (290 кр.)</option>
-        <option value="po_episode_stylized" selected>Эпизод: Стилизация (V2V)</option>
-        <option value="po_episode_cinema">Кинореализм Премиум (V2V)</option>
-      </select>
-      <button type="button" class="ghost small" id="showrunnerBtn" disabled>🎬 3-актный монтаж</button>
-      <button type="button" id="animaticBtn" disabled>Собрать аниматик + титры</button>
-    </div>
-    <div class="card" id="creditsBox">
-      <div class="row" style="justify-content:space-between">
-        <b style="font-size:12px">Титры эпизода</b>
-        <label class="row" style="margin:0; font-size:12px">
-          <input type="checkbox" id="creditsEnabledCheck" checked style="width:auto" />
-          Включить титры (4 сек)
-        </label>
-      </div>
-      <div class="row" style="margin-top:6px">
-        <input id="creditsTitleInput" placeholder="Название фильма…" style="flex:1" />
-        <input id="creditsDirectorInput" placeholder="Режиссёр…" value="Игрок и AI Showrunner" style="flex:1" />
-      </div>
-    </div>
-    <div id="cutEditorBox" class="card muted" style="display:none"></div>
-    <div class="preview-box" id="animaticBox">Аниматик ещё не собран</div>
-    <div class="card muted" id="estimateCard">Смета появится после сборки монтажа или аниматика.</div>
-    <button type="button" id="approveBtn" disabled>Утвердить аниматик и запустить пошотовый V2V</button>
-    <div class="status" id="filmStatus"></div>
-    <div id="v2vQueueBox" class="card muted" style="display:none"></div>
-  </section>
-</main>
+  </div>
+</div>
 
 <script>
 const SAMPLE_CHAPTER = \`Проклятие Серебряного Леса
-На мокрой лесной дороге следопыт Мира находит следы пропавшего обоза, которые обрываются у серебряного дерева.
-В окне старой таверны «Старый Ворон» дрожит тусклый свет свечей. У стола в углу сидит наёмник Шрам, положив руку на рукоять тесака, а у стойки притаился свидетель Торин, прячущий запечатанную записку.\`;
+На мокрой лесной дороге следопыт Мира находит следы пропавшего обоза, которые обрываются у старого серебряного дерева.
+В окне придорожной таверны «Старый Ворон» дрожит тусклый свет свечей. У углового стола сидит наёмник Шрам, положив ладонь на рукоять тесака, а у стойки притаился свидетель Торин, прячущий запечатанную записку.\`;
 
-let sessionId = null;
-let lastAnimaticData = null;
-const API_BASE = window.location.pathname.replace(/\/index\.html$/, "").replace(/\/+$/, "");
+const API_BASE = window.location.pathname.replace(/\\/index\\.html$/, "").replace(/\\/+$/, "");
 function apiUrl(p) { return API_BASE + p; }
 function mediaUrl(u) { return u && u.startsWith("/") ? API_BASE + u : u; }
 
-async function checkHealth() {
-  try {
-    const r = await fetch(apiUrl("/health"));
-    const d = await r.json();
-    document.getElementById("healthBadge").textContent =
-      (d.raeaAvailable ? "raea GPU: ON" : "raea: TSX-only") +
-      " · TTS: " + (d.ttsProvider || "on") +
-      " · V2V: " + (d.videoProvider || "mock") +
-      " · LLM: " + (d.llmMode || "fallback");
-  } catch {
-    document.getElementById("healthBadge").textContent = "Коннектор недоступен";
+let sessionId = null;
+let currentPlan = null;
+let inspectedItemId = null;
+let autoSpeak = true;
+let activeAudio = null;
+let busy = false;
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function renderMarkdownLite(md) {
+  return String(md || "")
+    .split(/\\n{2,}/)
+    .map((para) => {
+      const html = escapeHtml(para)
+        .replace(/\\*\\*(.+?)\\*\\*/g, "<strong>$1</strong>")
+        .replace(/\\*(.+?)\\*/g, "<em>$1</em>")
+        .replace(/\\n/g, "<br/>");
+      return "<p>" + html + "</p>";
+    })
+    .join("");
+}
+
+function stopCurrentAudio() {
+  if (activeAudio) {
+    activeAudio.pause();
+    activeAudio = null;
+  }
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+  }
+  document.getElementById("audioIndicator").textContent = "";
+}
+
+function speakAgentResponse(text, wavUrl) {
+  if (!autoSpeak) return;
+  stopCurrentAudio();
+  if (wavUrl) {
+    const audio = new Audio(mediaUrl(wavUrl));
+    activeAudio = audio;
+    document.getElementById("audioIndicator").textContent = "🔊 Звучит озвучка сцены…";
+    audio.onended = () => { document.getElementById("audioIndicator").textContent = ""; };
+    audio.onerror = () => { document.getElementById("audioIndicator").textContent = ""; };
+    audio.play().catch(() => {});
+    return;
+  }
+  if ("speechSynthesis" in window) {
+    const plain = String(text || "").replace(/[*_#•✓●○]/g, "").trim();
+    if (!plain) return;
+    const utter = new SpeechSynthesisUtterance(plain);
+    utter.lang = "ru-RU";
+    utter.rate = 1.03;
+    document.getElementById("audioIndicator").textContent = "🔊 Ведущий разъясняет голосом…";
+    utter.onend = () => { document.getElementById("audioIndicator").textContent = ""; };
+    window.speechSynthesis.speak(utter);
   }
 }
-checkHealth();
 
-document.getElementById("loadSampleBtn").onclick = () => {
-  document.getElementById("scenarioText").value = SAMPLE_CHAPTER;
-};
+/* ── Render Interactive 4-Step Visual Plan-Schema ── */
+function renderPlanSchema(plan, highlightId) {
+  if (!plan) return;
+  currentPlan = plan;
+  if (highlightId) inspectedItemId = highlightId;
 
-document.getElementById("fileInput").onchange = async (e) => {
-  const file = e.target.files?.[0];
-  if (!file) return;
-  document.getElementById("scenarioText").value = await file.text();
-};
+  document.getElementById("progressFill").style.width = (plan.progressPct || 12) + "%";
+  const activeItem = plan.items.find((i) => i.status === "active") || plan.items[plan.items.length - 1];
+  document.getElementById("stageCounterPill").textContent =
+    "Шаг " + activeItem.stepNumber + " из " + plan.items.length + " · " + activeItem.costBadge;
 
-document.getElementById("startBtn").onclick = async () => {
-  const scenarioText = document.getElementById("scenarioText").value.trim();
-  if (!scenarioText) return alert("Вставьте текст сценария или загрузите тестовую главу.");
-  const btn = document.getElementById("startBtn");
-  btn.disabled = true;
-  document.getElementById("turnStatus").textContent = "Строим Библию мира…";
-  try {
-    const res = await fetch(apiUrl("/v1/sessions"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        scenarioText,
-        stylePreset: document.getElementById("stylePreset").value,
-        heroName: document.getElementById("heroName").value.trim() || undefined,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Ошибка создания мира");
-    sessionId = data.session.sessionId;
-    const wb = data.session.worldBible;
-    const hero = wb.characters[0];
+  const grid = document.getElementById("schemaGrid");
+  grid.innerHTML = plan.items.map((item) => {
+    const stText = item.status === "done"
+      ? "✓ Выполнено"
+      : item.status === "active"
+        ? "● Сейчас здесь"
+        : "○ Впереди";
+    const isInspected = inspectedItemId === item.id ? " inspected" : "";
+    return '<button type="button" class="step-node ' + item.status + isInspected + '" data-step-id="' + item.id + '">' +
+      '<div class="step-top">' +
+        '<span class="step-status">' + stText + '</span>' +
+        '<span style="color:var(--muted)">' + escapeHtml(item.costBadge) + '</span>' +
+      '</div>' +
+      '<div class="step-name">' + escapeHtml(item.title) + '</div>' +
+      '<div class="step-sub">' + escapeHtml(item.subtitle) + '</div>' +
+    '</button>';
+  }).join("");
 
-    const refCards = (wb.characters || []).map((c) => {
-      const refUrl = mediaUrl(c.refSheetUrls?.[0]);
-      const img = refUrl ? '<img src="' + refUrl + '" alt="' + c.name + '" />' : "";
-      return '<a class="ref-item" href="' + (refUrl || "#") + '" target="_blank" style="color:inherit;text-decoration:none">' +
-        img + '<span><b>' + c.name + '</b><br/><span class="muted">' + c.role + '</span></span></a>';
-    }).join("");
+  grid.querySelectorAll("[data-step-id]").forEach((btn) => {
+    btn.onclick = () => {
+      const id = btn.getAttribute("data-step-id");
+      inspectedItemId = inspectedItemId === id ? null : id;
+      renderPlanSchema(currentPlan);
+      renderInspector();
+    };
+  });
 
-    document.getElementById("worldSummary").innerHTML =
-      "<b>" + wb.title + "</b> (" + wb.stylePreset + ", " + data.source + ")<br/>" +
-      "<small>Локация: " + wb.locations[0].name + " (" + wb.locations[0].lightingPreset + ")</small><br/>" +
-      "<small>Инвентарь героя: " + (hero.inventory || []).join(", ") + "</small>" +
-      '<div class="ref-grid">' + refCards + "</div>";
+  renderInspector();
+  renderQuickChips(plan.contextualActions || []);
+}
 
-    const statSelect = document.getElementById("statSelect");
-    statSelect.innerHTML = "";
-    Object.entries(hero.stats || { Смекалка: 2 }).forEach(([k, v]) => {
-      const opt = document.createElement("option");
-      opt.value = k;
-      opt.textContent = k + " (+" + v + ")";
-      statSelect.appendChild(opt);
-    });
-    statSelect.disabled = false;
-    document.getElementById("turnInput").disabled = false;
-    document.getElementById("sendBtn").disabled = false;
-    document.getElementById("showrunnerBtn").disabled = false;
-    document.getElementById("animaticBtn").disabled = false;
-    document.getElementById("creditsTitleInput").value = wb.title;
-
-    const log = document.getElementById("chatLog");
-    log.innerHTML = '<div class="msg"><b>Мастер:</b> ' + wb.sourceExcerptSummary + '<br/><small class="muted">Опишите первый ход героя.</small></div>';
-    document.getElementById("turnStatus").textContent = "Мир готов. Сделайте первый ход!";
-  } catch (err) {
-    document.getElementById("turnStatus").textContent = "Ошибка: " + err.message;
-  } finally {
-    btn.disabled = false;
+function renderInspector() {
+  const drawer = document.getElementById("inspectorDrawer");
+  if (!currentPlan || !inspectedItemId) {
+    drawer.className = "inspector-drawer";
+    drawer.innerHTML = "";
+    return;
   }
-};
+  const item = currentPlan.items.find((i) => i.id === inspectedItemId);
+  if (!item) return;
+  drawer.className = "inspector-drawer open";
+  drawer.innerHTML =
+    '<div class="row" style="justify-content:space-between">' +
+      '<strong>' + escapeHtml(item.title) + ' — карточка пункта дела</strong>' +
+      '<div class="row">' +
+        '<button type="button" class="small primary" id="askAgentStepBtn">💬 Разъяснить в диалоге и голосом</button>' +
+        '<button type="button" class="small" id="closeInspectorBtn">Скрыть</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="inspector-grid">' +
+      '<div><small style="color:var(--muted)">Что происходит:</small><br/>' + escapeHtml(item.explanation.what) + '</div>' +
+      '<div><small style="color:var(--muted)">Зачем это нужно:</small><br/>' + escapeHtml(item.explanation.why) + '</div>' +
+      '<div><small style="color:var(--muted)">Что сказать или написать:</small><br/>' + escapeHtml(item.explanation.howToAct) + '</div>' +
+      '<div><small style="color:var(--muted)">Результат в деле:</small><br/>' + escapeHtml(item.explanation.deliverable) + '</div>' +
+    '</div>';
 
-async function submitTurn(text) {
-  if (!sessionId || !text.trim()) return;
-  document.getElementById("sendBtn").disabled = true;
-  document.getElementById("turnStatus").textContent = "Бросок 2d6 + рендер 3D-сцены в raea…";
-  const log = document.getElementById("chatLog");
-  const pEl = document.createElement("div");
-  pEl.className = "msg player";
-  pEl.textContent = text;
-  log.appendChild(pEl);
-  log.scrollTop = log.scrollHeight;
+  document.getElementById("closeInspectorBtn").onclick = () => {
+    inspectedItemId = null;
+    renderPlanSchema(currentPlan);
+  };
+  document.getElementById("askAgentStepBtn").onclick = () => {
+    sendConverse("Разъясни подробно " + item.title, { targetPlanItemId: item.id });
+  };
+}
 
-  try {
-    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/turns"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        playerInput: text,
-        statToRoll: document.getElementById("statSelect").value,
-        renderMp4: document.getElementById("renderMp4Check").checked,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Ошибка хода");
+function renderQuickChips(actions) {
+  const box = document.getElementById("chipsRow");
+  box.innerHTML = "";
+  (actions || []).slice(0, 5).forEach((act) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "chip";
+    b.textContent = act.label;
+    b.onclick = () => sendConverse(act.prompt);
+    box.appendChild(b);
+  });
+}
 
-    const ev = data.event;
-    const roll = ev.diceRoll;
-    const mEl = document.createElement("div");
-    mEl.className = "msg";
-    mEl.innerHTML =
-      '<span class="roll ' + roll.outcome + '">2d6 [' + roll.dice.join("+") + "] + " + roll.modifier + " = " + roll.total + " (" + roll.outcome + ")</span>" +
-      "<div>" + ev.narrativeText + "</div>";
-    log.appendChild(mEl);
-    log.scrollTop = log.scrollHeight;
+/* ── Append Conversational Messages & Inline Visual Cards ── */
+function appendUserTurn(text) {
+  const stream = document.getElementById("stream");
+  const el = document.createElement("div");
+  el.className = "turn user";
+  el.innerHTML = '<div class="bubble"><div class="prose">' + renderMarkdownLite(text) + "</div></div>";
+  stream.appendChild(el);
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+}
 
-    const cBox = document.getElementById("choicesBox");
-    cBox.innerHTML = "";
-    (data.suggestedChoices || []).forEach((ch) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "ghost";
-      b.textContent = "→ " + ch;
-      b.onclick = () => { document.getElementById("turnInput").value = ""; submitTurn(ch); };
-      cBox.appendChild(b);
-    });
+function appendAgentTurn(data) {
+  const stream = document.getElementById("stream");
+  const el = document.createElement("div");
+  el.className = "turn agent";
 
-    const pBox = document.getElementById("previzBox");
-    if (data.media?.mp4Url) {
-      const trackTag = data.media.vttUrl
+  let extraHtml = "";
+
+  // 1. World Created -> Character Badges
+  if (data.kind === "world_created" && data.worldBible) {
+    const chips = (data.worldBible.characters || []).map((c) => {
+      const ref = mediaUrl(c.refSheetUrls?.[0]);
+      return '<a class="cast-chip" href="' + (ref || "#") + '" target="_blank">' +
+        (ref ? '<img src="' + ref + '" alt="' + escapeHtml(c.name) + '" />' : "") +
+        '<span><strong>' + escapeHtml(c.name) + '</strong> · <span style="color:var(--muted)">' + escapeHtml(c.role) + "</span></span>" +
+      "</a>";
+    }).join("");
+    extraHtml += '<div class="cast-row">' + chips + "</div>";
+  }
+
+  // 2. Story Turn -> Live 3D Frame / Clip
+  if (data.kind === "story_turn" && data.media) {
+    let stageInner = '<span style="padding:16px">3D-сцена записана в монтажный лист</span>';
+    if (data.media.mp4Url) {
+      const tr = data.media.vttUrl
         ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(data.media.vttUrl) + '" default />'
         : "";
-      pBox.innerHTML = '<video controls autoplay playsinline src="' + mediaUrl(data.media.mp4Url) + '">' + trackTag + '</video>';
-    } else if (data.media?.pngUrl) {
-      pBox.innerHTML = '<img src="' + mediaUrl(data.media.pngUrl) + '" alt="3D Previz" />';
-    } else {
-      pBox.textContent = "TSX скомпилирован (локальный raea отключён)";
+      stageInner = '<video controls autoplay playsinline src="' + mediaUrl(data.media.mp4Url) + '">' + tr + "</video>";
+    } else if (data.media.pngUrl) {
+      stageInner = '<img src="' + mediaUrl(data.media.pngUrl) + '" alt="3D кадр сцены" />';
     }
-    const audioSec = data.shot.audio?.audioDurationSec ? data.shot.audio.audioDurationSec + " сек TTS · " : "";
-    const srtLink = data.media?.srtUrl ? ' · <a href="' + mediaUrl(data.media.srtUrl) + '" download style="color:var(--accent)">SRT</a>' : "";
-    document.getElementById("previzMeta").innerHTML =
-      "Шот " + data.shot.id + " · " + audioSec + data.shot.durationInFrames + " кадров · камера: " + data.shot.camera.mode + " · рендер: " + data.render.durationMs + " мс" + srtLink;
-    document.getElementById("shotJson").textContent = JSON.stringify(data.shot, null, 2);
-    document.getElementById("turnStatus").textContent = "Ход #" + ev.turnIndex + " записан в 3D-сцену.";
+    extraHtml +=
+      '<div class="media-card">' +
+        '<div class="video-stage">' + stageInner + '</div>' +
+        '<div class="media-bar">' +
+          '<span>Кадр ' + escapeHtml(data.shot?.id) + ' · ракурс: ' + escapeHtml(data.shot?.camera?.mode) + '</span>' +
+          (data.media.srtUrl ? '<a href="' + mediaUrl(data.media.srtUrl) + '" download style="color:var(--accent)">Субтитры .srt</a>' : "") +
+        '</div>' +
+      '</div>';
+  }
+
+  // 3. Draft Ready / Draft Edited -> 3-Act Animatic + One-Tap Edit Chips + Approve Button
+  if ((data.kind === "draft_ready" || data.kind === "draft_edited") && data.episodeCut) {
+    let draftVideo = '<span style="padding:16px">3-актный черновик со звуком и субтитрами собран</span>';
+    if (data.animaticUrl) {
+      const tr = data.vttUrl
+        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(data.vttUrl) + '" default />'
+        : "";
+      draftVideo = '<video controls autoplay playsinline src="' + mediaUrl(data.animaticUrl) + '?t=' + Date.now() + '">' + tr + "</video>";
+    }
+    const beatsMap = {};
+    (data.episodeCut.beats || []).forEach((b) => { beatsMap[b.shotId] = b; });
+    const beatRows = (data.episodeCut.shots || []).map((s, idx) => {
+      const b = beatsMap[s.id];
+      return '<div class="beat-item">' +
+        '<span><strong>Кадр #' + (idx + 1) + '</strong>' + (b ? ' · Акт ' + b.act : '') + ' · ракурс: <em>' + escapeHtml(s.camera?.mode) + '</em></span>' +
+        '<span class="row">' +
+          '<button type="button" class="small" data-quick-prompt="В ' + (idx + 1) + ' кадре сделай крупный план">Крупный план</button>' +
+          (data.episodeCut.shots.length > 1
+            ? '<button type="button" class="small" data-quick-prompt="Удали ' + (idx + 1) + ' кадр">✕ Убрать</button>'
+            : '') +
+        '</span>' +
+      '</div>';
+    }).join("");
+
+    extraHtml +=
+      '<div class="media-card">' +
+        '<div class="video-stage">' + draftVideo + '</div>' +
+        '<div class="media-bar">' +
+          '<span><strong>Смета ФиксАР: ' + data.estimate.priceCredits + ' кр. (~' + data.estimate.priceRubApprox + ' ₽)</strong> · ' + data.estimate.totalDurationSec + ' сек</span>' +
+          '<button type="button" class="sage small" data-quick-prompt="Утверждаю, выпускай финальный фильм">✅ Утвердить и выпустить фильм</button>' +
+        '</div>' +
+        '<div class="beats-list">' + beatRows + '</div>' +
+      '</div>';
+  }
+
+  // 4. Final Film Ready / Shot Rerolled
+  if ((data.kind === "film_ready" || data.kind === "shot_rerolled") && data.job) {
+    const job = data.job;
+    const mp4 = job.masteredMp4Url ? mediaUrl(job.masteredMp4Url) + "?t=" + Date.now() : "";
+    const vtt = job.masteredVttUrl ? mediaUrl(job.masteredVttUrl) : "";
+    const srt = job.masteredSrtUrl ? mediaUrl(job.masteredSrtUrl) : "";
+    const rerollBtns = (job.shotStates || []).map((st, idx) =>
+      '<button type="button" class="small" data-quick-prompt="Пересними ' + (idx + 1) + ' кадр">↻ Дубль кадра #' + (idx + 1) + '</button>'
+    ).join("");
+
+    extraHtml +=
+      '<div class="media-card">' +
+        (mp4
+          ? '<div class="video-stage"><video controls autoplay playsinline src="' + mp4 + '">' +
+              (vtt ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + vtt + '" default />' : "") +
+            '</video></div>'
+          : '') +
+        '<div class="media-bar">' +
+          '<span><strong>Готовый фильм с титрами</strong> · ' + (((job.masteredBytes || 0) / (1024 * 1024)).toFixed(2)) + ' МБ</span>' +
+          '<span class="row">' +
+            (mp4 ? '<a href="' + mp4 + '" download style="color:var(--sage);font-weight:600">Скачать MP4</a>' : '') +
+            (srt ? '<a href="' + srt + '" download style="color:var(--accent)">SRT</a>' : '') +
+          '</span>' +
+        '</div>' +
+        '<div class="media-bar" style="border-top:1px solid var(--line)">' + rerollBtns + '</div>' +
+      '</div>';
+  }
+
+  el.innerHTML =
+    '<div class="bubble">' +
+      '<div class="speaker-tag"><span>Ведущий дела</span></div>' +
+      '<div class="prose">' + renderMarkdownLite(data.replyText) + '</div>' +
+      extraHtml +
+    '</div>';
+
+  el.querySelectorAll("[data-quick-prompt]").forEach((btn) => {
+    btn.onclick = () => sendConverse(btn.getAttribute("data-quick-prompt"));
+  });
+
+  stream.appendChild(el);
+  window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+
+  // Update suggested choices if story turn returned them
+  if (data.suggestedChoices && data.suggestedChoices.length > 0) {
+    const turnChips = data.suggestedChoices.map((c) => ({ label: "→ " + c, prompt: c }));
+    turnChips.push({ label: "🎬 Собрать черновик фильма", prompt: "Собери черновик фильма" });
+    turnChips.push({ label: "🗺 Разъясни пункты дела", prompt: "Разъясни все пункты дела" });
+    renderQuickChips(turnChips);
+  }
+}
+
+/* ── Unified Conversational Request ── */
+async function sendConverse(message, extra) {
+  const clean = String(message || "").trim();
+  if (!clean || busy) return;
+  busy = true;
+  document.getElementById("sendBtn").disabled = true;
+  appendUserTurn(clean.length > 260 ? clean.slice(0, 260) + "… (глава книги)" : clean);
+  document.getElementById("statusText").textContent = "Ведущий обрабатывает ваш шаг…";
+
+  try {
+    const res = await fetch(apiUrl("/v1/converse"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        sessionId: sessionId || undefined,
+        message: clean,
+        targetPlanItemId: extra?.targetPlanItemId,
+        stylePreset: extra?.stylePreset,
+        heroName: extra?.heroName,
+        speakReply: autoSpeak,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Ошибка обработки сообщения");
+
+    if (data.sessionId) sessionId = data.sessionId;
+    if (data.plan) renderPlanSchema(data.plan, data.highlightedItemId);
+    if (data.followUpActions) renderQuickChips(data.followUpActions);
+
+    appendAgentTurn(data);
+    // Avoid auto-speaking if an inline video with its own audio track is already autoplaying
+    const hasInlineAutoplayVideo =
+      (data.kind === "story_turn" && data.media?.mp4Url) ||
+      ((data.kind === "draft_ready" || data.kind === "draft_edited") && data.animaticUrl) ||
+      ((data.kind === "film_ready" || data.kind === "shot_rerolled") && data.job?.masteredMp4Url);
+
+    if (!hasInlineAutoplayVideo) {
+      speakAgentResponse(data.replyText, data.voiceUrl);
+    }
+    document.getElementById("statusText").textContent = "Готов к вашей следующей реплике голосом 🎙 или текстом.";
   } catch (err) {
-    document.getElementById("turnStatus").textContent = "Ошибка: " + err.message;
+    document.getElementById("statusText").textContent = "Ошибка: " + err.message;
   } finally {
+    busy = false;
     document.getElementById("sendBtn").disabled = false;
   }
 }
 
-document.getElementById("turnForm").onsubmit = (e) => {
+/* ── Initial Bootstrap ── */
+async function initApp() {
+  try {
+    const [hRes, pRes] = await Promise.all([
+      fetch(apiUrl("/health")),
+      fetch(apiUrl("/v1/plan-preview")),
+    ]);
+    const h = await hRes.json();
+    document.getElementById("engineBadge").textContent =
+      (h.raeaAvailable ? "3D GPU: активен" : "3D: быстрый режим") + " · 4 шага";
+    const p = await pRes.json();
+    if (p.plan) renderPlanSchema(p.plan);
+    if (p.welcome) {
+      appendAgentTurn({
+        kind: "explanation",
+        replyText:
+          "Здравствуйте! Я ваш **ведущий дела и режиссёр**.\n\n" + p.welcome.replyText,
+      });
+    }
+  } catch {
+    document.getElementById("engineBadge").textContent = "Офлайн";
+  }
+}
+initApp();
+
+/* ── Form, Theme, Voice Output & Chapter Modal Controls ── */
+document.getElementById("chatForm").onsubmit = (e) => {
   e.preventDefault();
-  const input = document.getElementById("turnInput");
-  const text = input.value.trim();
-  if (!text) return;
-  input.value = "";
-  submitTurn(text);
+  const inp = document.getElementById("chatInput");
+  const val = inp.value.trim();
+  if (!val) return;
+  inp.value = "";
+  sendConverse(val);
 };
 
-const CAMERA_OPTIONS = [
-  ["establishing", "Общий план (establishing)"],
-  ["medium_two_shot", "Двойной средний (two-shot)"],
-  ["over_the_shoulder", "Через плечо (OTS)"],
-  ["close_up", "Крупный план (close-up)"],
-  ["dolly_track", "Проезд камеры (dolly)"],
-  ["low_angle_hero", "Героический нижний (low-angle)"],
-];
+document.getElementById("explainAllBtn").onclick = () => {
+  sendConverse("Разъясни все пункты дела");
+};
 
-function escapeAttr(str) {
-  return String(str || "").replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+document.getElementById("themeToggle").onclick = () => {
+  const html = document.documentElement;
+  html.setAttribute("data-theme", html.getAttribute("data-theme") === "dark" ? "light" : "dark");
+};
+
+document.getElementById("voiceOutToggle").onclick = (e) => {
+  autoSpeak = !autoSpeak;
+  if (!autoSpeak) stopCurrentAudio();
+  e.currentTarget.textContent = autoSpeak ? "🔊 Озвучка: ВКЛ" : "🔇 Озвучка: ВЫКЛ";
+};
+
+const bookModal = document.getElementById("bookModal");
+document.getElementById("openBookModalBtn").onclick = () => bookModal.classList.add("open");
+document.getElementById("closeBookModalBtn").onclick = () => bookModal.classList.remove("open");
+document.getElementById("fillSampleBtn").onclick = () => {
+  document.getElementById("chapterTextarea").value = SAMPLE_CHAPTER;
+};
+document.getElementById("fileInput").onchange = async (e) => {
+  const f = e.target.files?.[0];
+  if (f) document.getElementById("chapterTextarea").value = await f.text();
+};
+document.getElementById("submitChapterBtn").onclick = () => {
+  const text = document.getElementById("chapterTextarea").value.trim() || SAMPLE_CHAPTER;
+  const stylePreset = document.getElementById("styleSelect").value;
+  const heroName = document.getElementById("heroInput").value.trim() || undefined;
+  bookModal.classList.remove("open");
+  sendConverse(text, { stylePreset, heroName });
+};
+
+/* ── Web Speech API Russian Voice Input (🎙) ── */
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recognition = null;
+let isListening = false;
+
+if (SpeechRec) {
+  recognition = new SpeechRec();
+  recognition.lang = "ru-RU";
+  recognition.interimResults = true;
+  recognition.continuous = false;
+
+  recognition.onstart = () => {
+    isListening = true;
+    stopCurrentAudio();
+    document.getElementById("micBtn").classList.add("listening");
+    document.getElementById("statusText").textContent = "🎙 Слушаю по-русски… говорите в микрофон";
+  };
+
+  recognition.onresult = (event) => {
+    let transcript = "";
+    let isFinal = false;
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      transcript += event.results[i][0].transcript;
+      if (event.results[i].isFinal) isFinal = true;
+    }
+    document.getElementById("chatInput").value = transcript;
+    if (isFinal && transcript.trim()) {
+      document.getElementById("chatInput").value = "";
+      sendConverse(transcript.trim());
+    }
+  };
+
+  recognition.onerror = () => {
+    isListening = false;
+    document.getElementById("micBtn").classList.remove("listening");
+    document.getElementById("statusText").textContent = "Не удалось распознать голос — попробуйте ещё раз или напишите текстом.";
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    document.getElementById("micBtn").classList.remove("listening");
+  };
 }
 
-function updateEstimateCard(est, extraMeta) {
-  if (!est) return;
-  const sizeMb = extraMeta?.bytes
-    ? (extraMeta.bytes / (1024 * 1024)).toFixed(2) + " МБ (лимит дела ФиксАР: 32 МБ)"
-    : "обновится после сборки MP4";
-  const subLinks = extraMeta?.srtUrl
-    ? '<br/>Субтитры и титры: <a href="' + mediaUrl(extraMeta.srtUrl) + '" download style="color:var(--accent)">Скачать .srt</a> · <a href="' + mediaUrl(extraMeta.vttUrl) + '" target="_blank" style="color:var(--accent)">WebVTT</a>'
-    : "";
-  document.getElementById("estimateCard").innerHTML =
-    "<b>Смета ФиксАР:</b> " + est.priceCredits + " кредитов (~" + est.priceRubApprox + " ₽)<br/>" +
-    "Шотов в монтаже: " + est.shotCount + " · Длительность (с титрами): " + est.totalDurationSec + " сек · Бесплатных пересъёмок: " + est.includedRerolls + "<br/>" +
-    "Размер аниматика: " + sizeMb + subLinks;
-}
-
-function renderCutEditor(episodeCut, droppedShotIds) {
-  const box = document.getElementById("cutEditorBox");
-  if (!episodeCut || !episodeCut.shots) {
-    box.style.display = "none";
+document.getElementById("micBtn").onclick = () => {
+  if (!recognition) {
+    alert("Ваш браузер не поддерживает голосовой ввод Web Speech API (откройте в Chrome, Safari или Edge).");
     return;
   }
-  box.style.display = "block";
-  const beatsByShot = {};
-  (episodeCut.beats || []).forEach((b) => { beatsByShot[b.shotId] = b; });
-  const droppedNote = droppedShotIds && droppedShotIds.length > 0
-    ? ' · <span style="color:var(--amber)">сжато лишних ходов: ' + droppedShotIds.length + "</span>"
-    : "";
-
-  const cards = episodeCut.shots.map((shot, idx) => {
-    const beat = beatsByShot[shot.id];
-    const actBadge = beat
-      ? '<span class="badge" style="font-size:11px;padding:1px 7px">Акт ' + beat.act + " · " + beat.dramaticFunction + "</span> "
-      : "";
-    const camOpts = CAMERA_OPTIONS.map(([val, label]) =>
-      '<option value="' + val + '"' + (shot.camera?.mode === val ? " selected" : "") + ">" + label + "</option>"
-    ).join("");
-    const dlgText = shot.audio?.dialogueLine?.text || "";
-    const durSec = shot.audio?.audioDurationSec || (shot.durationInFrames / shot.fps).toFixed(1);
-
-    return '<div class="shot-row" style="flex-direction:column;align-items:stretch" data-shot-card="' + shot.id + '">' +
-      '<div class="row" style="justify-content:space-between">' +
-        '<div>' + actBadge + '<b>#' + (idx + 1) + " (" + shot.id + ')</b> · <span class="muted">' + durSec + ' сек</span></div>' +
-        '<button type="button" class="ghost small" data-del-shot="' + shot.id + '" title="Удалить шот до оплаты">✕ Удалить</button>' +
-      "</div>" +
-      (beat ? '<div class="muted" style="font-size:11.5px">' + escapeAttr(beat.summary) + "</div>" : "") +
-      '<div class="row">' +
-        '<select data-cam-shot="' + shot.id + '" style="flex:1;padding:5px 8px;font-size:12px">' + camOpts + "</select>" +
-        '<button type="button" class="small" data-save-shot="' + shot.id + '">💾 Обновить шот + TTS</button>' +
-      "</div>" +
-      '<input data-dlg-shot="' + shot.id + '" value="' + escapeAttr(dlgText) + '" placeholder="Реплика персонажа в шоте…" style="padding:5px 8px;font-size:12px" />' +
-    "</div>";
-  }).join("");
-
-  box.innerHTML =
-    '<div style="margin-bottom:8px"><b>3-актный сценарий: «' + escapeAttr(episodeCut.title || "") + '»</b>' + droppedNote +
-    '<div class="muted" style="margin-top:2px">' + escapeAttr(episodeCut.logline || "") + "</div></div>" +
-    '<div class="shot-queue">' + cards + "</div>";
-
-  box.querySelectorAll("[data-save-shot]").forEach((btn) => {
-    btn.onclick = async () => {
-      const sid = btn.getAttribute("data-save-shot");
-      const cameraMode = box.querySelector('[data-cam-shot="' + sid + '"]').value;
-      const dialogueText = box.querySelector('[data-dlg-shot="' + sid + '"]').value.trim();
-      btn.disabled = true;
-      document.getElementById("filmStatus").textContent = "Пересчитываем TTS, 3D-кадр и смету для " + sid + "…";
-      try {
-        const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/shots/" + sid), {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            cameraMode,
-            dialogueText: dialogueText || undefined,
-            tariffTier: document.getElementById("tariffSelect").value,
-            renderMp4: document.getElementById("renderMp4Check").checked,
-          }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Ошибка сохранения шота");
-        renderCutEditor(data.episodeCut, []);
-        updateEstimateCard(data.estimate);
-        document.getElementById("filmStatus").textContent =
-          "Шот " + sid + " обновлён (" + data.shot.durationInFrames + " кадров). Нажмите «Собрать аниматик + титры» для склейки.";
-      } catch (err) {
-        document.getElementById("filmStatus").textContent = "Ошибка правки шота: " + err.message;
-      } finally {
-        btn.disabled = false;
-      }
-    };
-  });
-
-  box.querySelectorAll("[data-del-shot]").forEach((btn) => {
-    btn.onclick = async () => {
-      const sid = btn.getAttribute("data-del-shot");
-      btn.disabled = true;
-      document.getElementById("filmStatus").textContent = "Удаляем шот " + sid + " из монтажа…";
-      try {
-        const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/shots/" + sid), { method: "DELETE" });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error || "Не удалось удалить шот");
-        renderCutEditor(data.episodeCut, []);
-        updateEstimateCard(data.estimate);
-        document.getElementById("filmStatus").textContent =
-          "Шот " + sid + " удалён. Смета уменьшена (" + data.estimate.priceCredits + " кр.).";
-      } catch (err) {
-        document.getElementById("filmStatus").textContent = "Ошибка удаления: " + err.message;
-        btn.disabled = false;
-      }
-    };
-  });
-}
-
-document.getElementById("showrunnerBtn").onclick = async () => {
-  if (!sessionId) return;
-  const btn = document.getElementById("showrunnerBtn");
-  btn.disabled = true;
-  document.getElementById("filmStatus").textContent = "AI Showrunner сжимает ходы в 3-актный эпизод…";
-  try {
-    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/showrunner"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tariffTier: document.getElementById("tariffSelect").value,
-        customTitle: document.getElementById("creditsTitleInput").value.trim() || undefined,
-        directedBy: document.getElementById("creditsDirectorInput").value.trim() || undefined,
-        includeCredits: document.getElementById("creditsEnabledCheck").checked,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Ошибка AI Showrunner");
-    renderCutEditor(data.episodeCut, data.droppedShotIds);
-    updateEstimateCard(data.estimate);
-    document.getElementById("filmStatus").textContent =
-      "Монтажный лист готов (" + data.episodeCut.shots.length + " шотов). Отредактируйте ракурсы/реплики или соберите аниматик.";
-  } catch (err) {
-    document.getElementById("filmStatus").textContent = "Ошибка: " + err.message;
-  } finally {
-    btn.disabled = false;
-  }
-};
-
-document.getElementById("animaticBtn").onclick = async () => {
-  if (!sessionId) return;
-  document.getElementById("animaticBtn").disabled = true;
-  document.getElementById("filmStatus").textContent = "Собираем 3D-аниматик с титрами (raea + FFmpeg) и смету…";
-  try {
-    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/animatic"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tariffTier: document.getElementById("tariffSelect").value,
-        includeCredits: document.getElementById("creditsEnabledCheck").checked,
-        customTitle: document.getElementById("creditsTitleInput").value.trim() || undefined,
-        directedBy: document.getElementById("creditsDirectorInput").value.trim() || undefined,
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Ошибка сборки аниматика");
-    lastAnimaticData = data;
-    const aBox = document.getElementById("animaticBox");
-    if (data.animaticUrl) {
-      const aTrack = data.vttUrl
-        ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(data.vttUrl) + '" default />'
-        : "";
-      aBox.innerHTML = '<video controls autoplay playsinline src="' + mediaUrl(data.animaticUrl) + '?t=' + Date.now() + '">' + aTrack + '</video>';
-    } else {
-      aBox.textContent = data.concatNote || "Аниматик собран (без MP4).";
-    }
-    if (data.episodeCut) {
-      renderCutEditor(data.episodeCut, []);
-    }
-    updateEstimateCard(data.estimate, data);
-    document.getElementById("approveBtn").disabled = false;
-    document.getElementById("filmStatus").textContent =
-      "Аниматик" + (data.creditsIncluded ? " с финальными титрами" : "") + " готов! Проверьте и утвердите перед V2V.";
-  } catch (err) {
-    document.getElementById("filmStatus").textContent = "Ошибка: " + err.message;
-  } finally {
-    document.getElementById("animaticBtn").disabled = false;
-  }
-};
-
-function renderV2VQueue(job) {
-  const box = document.getElementById("v2vQueueBox");
-  if (!job || !job.shotStates) {
-    box.style.display = "none";
-    return;
-  }
-  box.style.display = "block";
-  const freeLeft = Math.max(0, (job.includedRerolls || 0) - (job.usedFreeRerolls || 0));
-  const extraInfo = job.extraRerollCreditsCharged
-    ? " · Доп. списано: " + job.extraRerollCreditsCharged + " кр."
-    : "";
-  const rows = job.shotStates.map((st) => {
-    const link = st.videoUrl
-      ? ' · <a href="' + st.videoUrl + '" target="_blank" style="color:var(--accent)">клип</a>'
-      : "";
-    return '<div class="shot-row">' +
-      '<div><b>' + st.shotId + '</b> · <span class="muted">' + st.status +
-      " · seed " + (st.seed ?? "—") +
-      " · дублей: " + (st.rerollCount || 0) +
-      " · refs: " + (st.characterRefUrls?.length || 0) + '</span>' + link + "</div>" +
-      '<button type="button" class="ghost small" data-reroll-shot="' + st.shotId + '">↻ Переснять шот</button>' +
-      "</div>";
-  }).join("");
-
-  const masteredBlock = job.masteredMp4Url
-    ? '<div style="margin-bottom:10px">' +
-        '<div class="preview-box" style="margin-bottom:6px">' +
-          '<video controls autoplay playsinline src="' + mediaUrl(job.masteredMp4Url) + '?t=' + Date.now() + '">' +
-            (job.masteredVttUrl ? '<track kind="subtitles" srclang="ru" label="Русский" src="' + mediaUrl(job.masteredVttUrl) + '" default />' : "") +
-          '</video>' +
-        '</div>' +
-        '<div class="muted"><b>Финальный V2V-фильм готов:</b> ' +
-          ((job.masteredBytes || 0) / (1024 * 1024)).toFixed(2) + ' МБ (&lt;= 32 МБ) · ' +
-          '<a href="' + mediaUrl(job.masteredMp4Url) + '" download style="color:var(--accent)">Скачать MP4</a>' +
-          (job.masteredSrtUrl ? ' · <a href="' + mediaUrl(job.masteredSrtUrl) + '" download style="color:var(--accent)">SRT</a>' : "") +
-        '</div>' +
-      '</div>'
-    : "";
-
-  box.innerHTML =
-    masteredBlock +
-    '<div style="margin-bottom:8px"><b>Очередь V2V (' + job.progressPct + '%)</b> · ' +
-    "Бесплатных пересъёмок осталось: <b>" + freeLeft + " из " + (job.includedRerolls || 0) + "</b>" +
-    extraInfo + "</div>" +
-    '<div class="shot-queue">' + rows + "</div>";
-
-  box.querySelectorAll("[data-reroll-shot]").forEach((btn) => {
-    btn.onclick = () => rerollShot(btn.getAttribute("data-reroll-shot"));
-  });
-}
-
-async function rerollShot(shotId, extraPaymentGrantId) {
-  if (!sessionId || !shotId) return;
-  document.getElementById("filmStatus").textContent = "Переснимаем шот " + shotId + " (новый seed)…";
-  try {
-    const payload = { shotId };
-    if (extraPaymentGrantId) payload.extraPaymentGrantId = extraPaymentGrantId;
-    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/reroll"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    const data = await res.json();
-    if (res.status === 402 && !extraPaymentGrantId) {
-      const ok = confirm(
-        (data.error || "Бесплатные пересъёмки исчерпаны.") +
-        "\\nПодтвердить доп. оплату (" + (data.extraCreditsRequired || 120) + " кр.)?"
-      );
-      if (ok) {
-        return rerollShot(shotId, "grant_extra_local_001");
-      }
-      document.getElementById("filmStatus").textContent = "Пересъёмка отменена.";
-      return;
-    }
-    if (!res.ok) throw new Error(data.error || "Ошибка пересъёмки шота");
-    renderV2VQueue(data.job);
-    document.getElementById("filmStatus").textContent =
-      "Шот " + shotId + " переснят (seed " + data.rerolledShot.seed + ", дубль #" + data.rerolledShot.rerollCount + ").";
-  } catch (err) {
-    document.getElementById("filmStatus").textContent = "Ошибка пересъёмки: " + err.message;
-  }
-}
-
-document.getElementById("approveBtn").onclick = async () => {
-  if (!sessionId || !lastAnimaticData) return;
-  document.getElementById("approveBtn").disabled = true;
-  document.getElementById("filmStatus").textContent = "Запускаем утверждённый пошотовый V2V-рендер…";
-  try {
-    const res = await fetch(apiUrl("/v1/sessions/" + sessionId + "/approve"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tariffTier: document.getElementById("tariffSelect").value,
-        paymentGrantId: "grant_local_preview_001",
-      }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Ошибка утверждения");
-    renderV2VQueue(data.job);
-    document.getElementById("filmStatus").textContent =
-      "Готово! Job " + data.job.jobId + " · status=" + data.job.status + " · шотов: " + (data.job.shotStates?.length || 1);
-  } catch (err) {
-    document.getElementById("filmStatus").textContent = "Ошибка: " + err.message;
-  } finally {
-    document.getElementById("approveBtn").disabled = false;
+  if (isListening) {
+    recognition.stop();
+  } else {
+    recognition.start();
   }
 };
 </script>

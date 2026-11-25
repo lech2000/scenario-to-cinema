@@ -4,13 +4,13 @@ kind: Pack
 metadata:
   namespace: cinema-rpg
   name: book-to-film-rpg
-  version: 0.1.0
+  version: 0.2.0
   publisher: pub_cinema_rpg
-  title: "Книга в кино: ИИ-НРИ с 3D-режиссёром"
+  title: "Книга в кино: ИИ-ведущий дела и 3D-режиссёр"
   summary: >-
-    Превращает главу книги в соло-НРИ с живым 3D-превизом сцен на raea и
-    собирает в финале художественный мини-фильм (2–5 мин) с многоголосым
-    озвучиванием и видеогенерацией после утверждения аниматика.
+    Упрощённый голосовой и текстовый конвейер (4 шага с визуальной схемой дела):
+    ведущий разъясняет каждый пункт плана, ведёт живую историю 2d6 с 3D-сценами
+    на raea и выпускает озвученный мини-фильм с титрами после вашего согласия.
   license: MIT
   categories: [automation, integration, knowledge]
   keywords: [ttrpg, cinema, raea, story, video]
@@ -23,7 +23,7 @@ spec:
 
   components:
     domains: [book-to-film-rpg]
-    agents: [world-builder, game-master, showrunner]
+    agents: [case-guide, game-master, showrunner]
     connectors:
       - name: cinema-engine-api
         type: http

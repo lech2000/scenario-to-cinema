@@ -12,3 +12,11 @@ export {
   type BuildShowrunnerCutParams,
   type ShowrunnerCutResult,
 } from "./showrunner.js";
+export {
+  DEFAULT_SAMPLE_CHAPTER_RU,
+  buildCasePlanSnapshot,
+  detectTargetItemIdFromText,
+  explainCasePlan,
+  parseConversationalAction,
+  type ConversationalIntent,
+} from "./case-guide.js";
